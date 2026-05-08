@@ -1,0 +1,65 @@
+{
+  "name": "voxly-electron",
+  "version": "0.1.0",
+  "description": "Voxly desktop dictation overlay",
+  "private": true,
+  "type": "commonjs",
+  "main": "out/main/main.js",
+  "scripts": {
+    "dev": "node scripts/run-electron-vite.cjs dev",
+    "build": "tsc --noEmit && electron-vite build",
+    "preview": "node scripts/run-electron-vite.cjs preview",
+    "dist": "npm run build && electron-builder",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.14.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.16.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^39.2.6",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.3.1"
+  },
+  "build": {
+    "appId": "com.voxly.desktop",
+    "productName": "Voxly",
+    "files": [
+      "out/**/*",
+      "resources/**/*"
+    ],
+    "asarUnpack": [
+      "resources/bin/**",
+      "resources/models/**"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "resources/entitlements.mac.plist",
+      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Voxly uses the microphone to transcribe your speech."
+      }
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility"
+    }
+  }
+}

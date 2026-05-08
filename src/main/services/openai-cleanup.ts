@@ -1,0 +1,135 @@
+import type { AppSettings, TranscriptionRecord } from "../types";
+import { createMainLogger } from "../debug-log";
+import { credentialStore } from "./credential-store";
+
+const log = createMainLogger("openai-cleanup");
+
+const OPENAI_MODEL = "gpt-4.1-mini";
+const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+
+type CleanupResult = {
+  text: string;
+  method: TranscriptionRecord["processingMethod"];
+};
+
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+};
+
+export class OpenAiCleanupService {
+  async process(text: string, settings: AppSettings): Promise<CleanupResult> {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (!normalized) return { text: "", method: "cleanup" };
+
+    const apiKey = await this.resolveApiKey(settings);
+    if (!apiKey) {
+      throw new Error("AI cleanup requires OPENAI_API_KEY or an OpenAI API key in settings.");
+    }
+
+    const agentInstruction = this.extractAgentInstruction(normalized, settings.agentName);
+    const method: CleanupResult["method"] = agentInstruction ? "agent" : "cleanup";
+    const messages = agentInstruction
+      ? this.agentMessages(settings.agentName, normalized, agentInstruction)
+      : this.cleanupMessages(normalized);
+
+    const baseUrl = this.resolveBaseUrl(settings);
+    const started = Date.now();
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        temperature: 0.2,
+        messages,
+      }),
+    });
+
+    const body = await response.text();
+    const payload = this.parseResponse(body);
+
+    log.debug("OpenAI cleanup response received", {
+      status: response.status,
+      elapsedMs: Date.now() - started,
+      method,
+    });
+
+    if (!response.ok) {
+      throw new Error(payload.error?.message || `OpenAI cleanup returned ${response.status}`);
+    }
+
+    const processed = payload.choices?.[0]?.message?.content?.trim();
+    if (!processed) {
+      throw new Error("OpenAI cleanup returned an empty response.");
+    }
+
+    log.info("OpenAI cleanup completed", { method, originalLength: normalized.length, processedLength: processed.length });
+    return { text: processed, method };
+  }
+
+  private cleanupMessages(text: string) {
+    return [
+      {
+        role: "system",
+        content:
+          "You clean up dictated text before it is pasted. Fix punctuation, capitalization, and obvious filler words. Preserve meaning and wording. Return only the cleaned text.",
+      },
+      {
+        role: "user",
+        content: text,
+      },
+    ];
+  }
+
+  private agentMessages(agentName: string, fullText: string, instruction: string) {
+    return [
+      {
+        role: "system",
+        content:
+          "You are a voice writing assistant. The user addressed you by name and gave an instruction. Follow the instruction and return only the text that should be pasted.",
+      },
+      {
+        role: "user",
+        content: `Assistant name: ${agentName}\nInstruction: ${instruction}\nRaw dictation: ${fullText}`,
+      },
+    ];
+  }
+
+  private extractAgentInstruction(text: string, agentName: string): string | null {
+    const name = agentName.trim();
+    if (!name) return null;
+
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`^(?:hey\\s+|hi\\s+|okay\\s+|ok\\s+)?${escapedName}[,.:;\\s-]+(.+)$`, "i");
+    const match = text.match(pattern);
+    return match?.[1]?.trim() || null;
+  }
+
+  private async resolveApiKey(settings: AppSettings): Promise<string> {
+    return settings.openaiApiKey.trim() || process.env.OPENAI_API_KEY?.trim() || (await credentialStore.get("openaiApiKey"));
+  }
+
+  private resolveBaseUrl(settings: AppSettings): string {
+    return (settings.openaiBaseUrl.trim() || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
+  }
+
+  private parseResponse(body: string): ChatCompletionResponse {
+    if (!body) return {};
+    try {
+      return JSON.parse(body) as ChatCompletionResponse;
+    } catch {
+      return { error: { message: body } };
+    }
+  }
+}
+
+export const openAiCleanupService = new OpenAiCleanupService();

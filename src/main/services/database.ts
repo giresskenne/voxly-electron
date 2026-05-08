@@ -1,0 +1,161 @@
+import { app } from "electron";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import type { TranscriptionRecord } from "../types";
+import { createMainLogger } from "../debug-log";
+
+const log = createMainLogger("database");
+
+type NewRecord = Omit<TranscriptionRecord, "id" | "timestamp">;
+type Statement = {
+  all: (...params: unknown[]) => unknown[];
+  get: (...params: unknown[]) => unknown;
+  run: (...params: unknown[]) => unknown;
+};
+type DatabaseSync = {
+  exec: (sql: string) => void;
+  prepare: (sql: string) => Statement;
+};
+type SQLiteModule = {
+  DatabaseSync: new (filePath: string) => DatabaseSync;
+};
+type SqliteRecord = Omit<TranscriptionRecord, "isProcessed"> & { isProcessed: 0 | 1 };
+
+export class TranscriptionDatabase {
+  private sqlitePath = path.join(app.getPath("userData"), "transcriptions.sqlite");
+  private fallbackPath = path.join(app.getPath("userData"), "transcriptions.json");
+  private db: DatabaseSync | null = null;
+  private rows: TranscriptionRecord[] = [];
+
+  async init(): Promise<void> {
+    await mkdir(path.dirname(this.sqlitePath), { recursive: true });
+    try {
+      log.debug("Initializing SQLite database", { sqlitePath: this.sqlitePath });
+      const sqlite = (await import("node:sqlite")) as unknown as SQLiteModule;
+      this.db = new sqlite.DatabaseSync(this.sqlitePath);
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS transcriptions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+          original_text TEXT NOT NULL,
+          processed_text TEXT,
+          is_processed BOOLEAN DEFAULT 0,
+          processing_method TEXT DEFAULT 'none',
+          agent_name TEXT,
+          error TEXT
+        );
+      `);
+      log.info("SQLite database ready");
+      return;
+    } catch (error) {
+      log.warn("SQLite unavailable; falling back to JSON store", error);
+      this.db = null;
+    }
+
+    try {
+      log.debug("Reading fallback transcription history", { fallbackPath: this.fallbackPath });
+      this.rows = JSON.parse(await readFile(this.fallbackPath, "utf8")) as TranscriptionRecord[];
+      log.info("Fallback transcription history loaded", { count: this.rows.length });
+    } catch (error) {
+      log.warn("Fallback history missing or unreadable; creating a new file", error);
+      this.rows = [];
+      await this.persist();
+    }
+  }
+
+  async list(limit = 50): Promise<TranscriptionRecord[]> {
+    log.debug("Listing transcription history", { limit, backend: this.db ? "sqlite" : "json" });
+    if (this.db) {
+      const rows = this.db.prepare(`
+        SELECT
+          id,
+          timestamp,
+          original_text AS originalText,
+          processed_text AS processedText,
+          is_processed AS isProcessed,
+          processing_method AS processingMethod,
+          agent_name AS agentName,
+          error
+        FROM transcriptions
+        ORDER BY datetime(timestamp) DESC
+        LIMIT ?
+      `).all(limit) as SqliteRecord[];
+
+      const mapped = rows.map((row) => ({ ...row, isProcessed: Boolean(row.isProcessed) }));
+      log.debug("SQLite history returned", { count: mapped.length });
+      return mapped;
+    }
+
+    const rows = [...this.rows]
+      .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+      .slice(0, limit);
+    log.debug("JSON history returned", { count: rows.length });
+    return rows;
+  }
+
+  async save(record: NewRecord): Promise<TranscriptionRecord> {
+    log.debug("Saving transcription record", {
+      backend: this.db ? "sqlite" : "json",
+      isProcessed: record.isProcessed,
+      processingMethod: record.processingMethod,
+      hasError: Boolean(record.error),
+      originalTextLength: record.originalText.length,
+      processedTextLength: record.processedText?.length ?? 0,
+    });
+    if (this.db) {
+      const statement = this.db.prepare(`
+        INSERT INTO transcriptions (
+          original_text,
+          processed_text,
+          is_processed,
+          processing_method,
+          agent_name,
+          error
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        RETURNING
+          id,
+          timestamp,
+          original_text AS originalText,
+          processed_text AS processedText,
+          is_processed AS isProcessed,
+          processing_method AS processingMethod,
+          agent_name AS agentName,
+          error
+      `);
+      const row = statement.get(
+        record.originalText,
+        record.processedText,
+        record.isProcessed ? 1 : 0,
+        record.processingMethod,
+        record.agentName,
+        record.error,
+      ) as SqliteRecord;
+
+      const saved = { ...row, isProcessed: Boolean(row.isProcessed) };
+      log.info("SQLite transcription record saved", { id: saved.id });
+      return saved;
+    }
+
+    const next: TranscriptionRecord = {
+      ...record,
+      id: this.nextId(),
+      timestamp: new Date().toISOString(),
+    };
+    this.rows.push(next);
+    await this.persist();
+    log.info("JSON transcription record saved", { id: next.id });
+    return next;
+  }
+
+  private nextId(): number {
+    return this.rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+  }
+
+  private async persist(): Promise<void> {
+    log.debug("Persisting fallback transcription history", { fallbackPath: this.fallbackPath, count: this.rows.length });
+    await writeFile(this.fallbackPath, JSON.stringify(this.rows, null, 2));
+  }
+}
+
+export const transcriptionDatabase = new TranscriptionDatabase();
