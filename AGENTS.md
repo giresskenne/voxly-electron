@@ -123,6 +123,7 @@ CSS targets these: `.overlay-mic-btn[data-state="recording"] { … }`
 - Do not skip `z-index: 1` on children of glass panels — the specular `::before` layer sits at `z-index: 0` and will cover content.
 - Do not use `ipcRenderer` directly in renderer code — always go through `window.electronAPI`.
 - Do not hardcode port numbers — use `settings.whisperPort`.
+- Do not use colored background cards for status/badge labels (e.g. no `background: #F0FDF4` green cards, no tinted-green/red pill backgrounds). Status badges must use `background: transparent` or `var(--glass-bg-subtle)` with `border: 1px solid var(--glass-border)` and `color: var(--muted-foreground)`. Reserve `var(--destructive)` text for genuine error states only — never as a background fill. Colored pill cards are considered "vibe-coded" and break the design system.
 
 ---
 

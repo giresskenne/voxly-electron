@@ -7,7 +7,7 @@ const log = createPreloadLogger("preload");
 type TranscribeResult = {
   text: string;
   originalText: string;
-  record: TranscriptionRecord;
+  record: TranscriptionRecord | null;
 };
 
 const api = {
@@ -19,10 +19,16 @@ const api = {
   pasteText: (text: string) =>
     invoke<{ ok: boolean; fallback: boolean; message?: string }>("paste:text", text),
   setOverlayInteractive: (interactive: boolean) => invoke<void>("overlay:set-interactive", interactive),
+  startWindowDrag: () => invoke<void>("window:start-drag"),
+  stopWindowDrag: () => invoke<void>("window:stop-drag"),
   openPanel: () => invoke<void>("panel:open"),
   openPermissionSettings: (kind: "microphone" | "accessibility" | "sound-input") =>
     invoke<void>("permissions:open", kind),
+    openURL: (url: string) => invoke<void>("app:open-url", url),
   getRuntimeStatus: () => invoke<RuntimeStatus>("runtime:status"),
+  log: (entry: { level: string; message: string; meta?: unknown; scope?: string; source?: string }) =>
+    invoke<void>("log:write", entry),
+  getLogLevel: () => invoke<string>("log:get-level"),
   onDictationToggle: (callback: () => void) => {
     const listener = () => callback();
     log.debug("Subscribing to dictation:toggle");
@@ -30,6 +36,36 @@ const api = {
     return () => {
       log.debug("Unsubscribing from dictation:toggle");
       ipcRenderer.removeListener("dictation:toggle", listener);
+    };
+  },
+  onDictationStart: (callback: () => void) => {
+    const listener = () => callback();
+    log.debug("Subscribing to dictation:start");
+    ipcRenderer.on("dictation:start", listener);
+    return () => {
+      log.debug("Unsubscribing from dictation:start");
+      ipcRenderer.removeListener("dictation:start", listener);
+    };
+  },
+  onDictationStop: (callback: () => void) => {
+    const listener = () => callback();
+    log.debug("Subscribing to dictation:stop");
+    ipcRenderer.on("dictation:stop", listener);
+    return () => {
+      log.debug("Unsubscribing from dictation:stop");
+      ipcRenderer.removeListener("dictation:stop", listener);
+    };
+  },
+  onSettingsUpdated: (callback: (settings: AppSettings) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, settings: AppSettings) => {
+      log.debug("Received settings:updated", settings);
+      callback(settings);
+    };
+    log.debug("Subscribing to settings:updated");
+    ipcRenderer.on("settings:updated", listener);
+    return () => {
+      log.debug("Unsubscribing from settings:updated");
+      ipcRenderer.removeListener("settings:updated", listener);
     };
   },
   onRuntimeStatus: (callback: (status: RuntimeStatus) => void) => {
@@ -43,6 +79,11 @@ const api = {
       log.debug("Unsubscribing from runtime:status");
       ipcRenderer.removeListener("runtime:status", listener);
     };
+  },
+  onTranscriptionSaved: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("transcription:saved", listener);
+    return () => ipcRenderer.removeListener("transcription:saved", listener);
   },
 };
 

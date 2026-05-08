@@ -6,6 +6,7 @@
   "type": "commonjs",
   "main": "out/main/main.js",
   "scripts": {
+    "postinstall": "node scripts/patch-electron-bundle.js",
     "dev": "node scripts/run-electron-vite.cjs dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "node scripts/run-electron-vite.cjs preview",
@@ -42,6 +43,7 @@
       "resources/models/**"
     ],
     "mac": {
+      "icon": "resources/icon.icns",
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,

@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -105,15 +105,15 @@ export class WhisperService {
 
     const dir = path.join(os.tmpdir(), "voxly");
     await mkdir(dir, { recursive: true });
-    const audioPath = path.join(dir, `audio-${Date.now()}.webm`);
+    const audioPath = path.join(dir, `audio-${Date.now()}.wav`);
     await writeFile(audioPath, Buffer.from(buffer));
     log.debug("Temporary audio written", { audioPath, byteLength: buffer.byteLength });
 
     try {
       const form = new FormData();
       const audio = await this.fileToBuffer(audioPath);
-      const file = new Blob([new Uint8Array(audio).slice()], { type: "audio/webm" });
-      form.append("file", file, "audio.webm");
+      const file = new Blob([new Uint8Array(audio).slice()], { type: "audio/wav" });
+      form.append("file", file, "audio.wav");
       form.append("language", settings.language);
       form.append("prompt", settings.customDictionary.join(" "));
 
@@ -129,8 +129,12 @@ export class WhisperService {
       }
 
       const payload = (await response.json()) as { text?: string };
-      log.info("Whisper transcription completed", { text: payload.text?.trim() ?? "" });
-      return payload.text?.trim() ?? "";
+      const rawText = payload.text?.trim() ?? "";
+      // Whisper emits "[BLANK_AUDIO]" (and similar) when no speech was detected.
+      // Return empty string so callers can silently skip pasting.
+      const text = /^\[blank_audio\]$/i.test(rawText) ? "" : rawText;
+      log.info("Whisper transcription completed", { text });
+      return text;
     } finally {
       await rm(audioPath, { force: true });
       log.debug("Temporary audio removed", { audioPath });
@@ -149,6 +153,10 @@ export class WhisperService {
     const candidate = app.isPackaged
       ? path.join(process.resourcesPath, "bin", name)
       : path.join(app.getAppPath(), "resources", "bin", name);
+    if (!existsSync(candidate)) {
+      log.warn("Whisper binary not found", { candidate });
+      return null;
+    }
     log.debug("Resolved whisper binary path", { candidate });
     return candidate;
   }
@@ -157,6 +165,10 @@ export class WhisperService {
     const candidate = app.isPackaged
       ? path.join(process.resourcesPath, "models", `ggml-${model}.bin`)
       : path.join(app.getAppPath(), "resources", "models", `ggml-${model}.bin`);
+    if (!existsSync(candidate)) {
+      log.warn("Whisper model not found", { model, candidate });
+      return null;
+    }
     log.debug("Resolved whisper model path", { model, candidate });
     return candidate;
   }

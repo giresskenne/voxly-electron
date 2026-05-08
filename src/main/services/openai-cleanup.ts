@@ -30,7 +30,8 @@ export class OpenAiCleanupService {
 
     const apiKey = await this.resolveApiKey(settings);
     if (!apiKey) {
-      throw new Error("AI cleanup requires OPENAI_API_KEY or an OpenAI API key in settings.");
+      log.warn("No API key configured — skipping cleanup, returning raw transcription");
+      return { text: normalized, method: "none" as const };
     }
 
     const agentInstruction = this.extractAgentInstruction(normalized, settings.agentName);

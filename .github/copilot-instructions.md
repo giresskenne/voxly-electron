@@ -45,4 +45,5 @@ BEM-ish naming: `.block`, `.block__element`, `.block--modifier`.
 
 Tailwind, CSS modules, shadcn/ui, or new CSS frameworks.  
 No new npm packages without a reason.  
-No `background: white` or flat greys on surfaces — the glass blur requires the gradient background.
+No `background: white` or flat greys on surfaces — the glass blur requires the gradient background.  
+No colored background cards for status/badge labels (e.g. no green `#F0FDF4`, no tinted-red fills). Status badges must use `background: transparent` or `var(--glass-bg-subtle)` with `border: 1px solid var(--glass-border)` and `color: var(--muted-foreground)`. Colored pill cards break the design system and are considered "vibe-coded".

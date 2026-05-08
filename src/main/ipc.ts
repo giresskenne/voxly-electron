@@ -8,11 +8,17 @@ import { openAiCleanupService } from "./services/openai-cleanup";
 import { pasteText } from "./services/paste";
 import { windows } from "./window-manager";
 import { registerDictationHotkey } from "./services/hotkeys";
-import { createMainLogger } from "./debug-log";
+import { globeKeyManager } from "./services/globe-key-manager";
+import { createMainLogger, getLogLevel, logRendererEntry } from "./debug-log";
 import type { AudioChunk } from "./types";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
+const PUSH_HOLD_START_DELAY_MS = 150;
+const PUSH_STOP_COOLDOWN_MS = 300;
+let pushKeyDownAt = 0;
+let pushKeyIsRecording = false;
+let pushLastStopAt = 0;
 
 export function registerIpc(): void {
   log.info("Registering IPC handlers");
@@ -28,10 +34,21 @@ export function registerIpc(): void {
     if (shouldRefreshWhisper(patch)) {
       await whisperService.prewarm(settings);
     }
-    hotkeyRegistered = registerDictationHotkey(settings.hotkey, () => windows.sendDictationToggle());
+    configureDictationHotkey(settings);
+    windows.sendSettingsUpdated(settings);
     windows.sendRuntimeStatus(getRuntimeStatus());
     log.info("Settings updated via IPC", { hotkeyRegistered });
     return settings;
+  });
+
+  ipcMain.handle("window:start-drag", () => {
+    log.debug("IPC window:start-drag");
+    windows.startWindowDrag();
+  });
+
+  ipcMain.handle("window:stop-drag", () => {
+    log.debug("IPC window:stop-drag");
+    windows.stopWindowDrag();
   });
 
   ipcMain.handle("history:list", (_, limit?: number) => {
@@ -45,34 +62,68 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("transcribe:local-whisper", async (_, buffer: ArrayBuffer, options?: Partial<AppSettings>, chunks?: AudioChunk[]) => {
-    log.info("IPC transcribe:local-whisper", { byteLength: buffer.byteLength, chunkCount: chunks?.length ?? 0, options });
+    const pipelineStart = Date.now();
+    log.info("IPC transcribe:local-whisper — pipeline start", {
+      byteLength: buffer.byteLength,
+      chunkCount: chunks?.length ?? 0,
+      options,
+    });
     const settings = { ...settingsStore.get(), ...options };
+
+    const t0 = Date.now();
     const originalText = await transcribeAudio(buffer, settings, chunks ?? []);
+    const transcribeMs = Date.now() - t0;
+    log.info("Pipeline stage: transcription complete", {
+      transcribeMs,
+      transcriptionMode: settings.transcriptionMode,
+      textLength: originalText.length,
+    });
+
+    // Nothing was said — skip cleanup, DB save, and paste.
+    if (!originalText.trim()) {
+      log.info("IPC transcribe:local-whisper — blank audio, aborting pipeline");
+      return { text: "", originalText: "", record: null };
+    }
+
+    const t1 = Date.now();
     const cleanup = settings.cleanupEnabled
       ? await openAiCleanupService.process(originalText, settings)
       : { text: originalText, method: "none" as const };
-    const processedText = cleanup.text;
-    log.debug("Transcription post-processing complete", {
-      transcriptionMode: settings.transcriptionMode,
+    const cleanupMs = Date.now() - t1;
+    log.info("Pipeline stage: cleanup complete", {
+      cleanupMs,
       cleanupEnabled: settings.cleanupEnabled,
       processingMethod: cleanup.method,
-      originalText,
-      processedText,
+      originalLength: originalText.length,
+      processedLength: cleanup.text.length,
     });
+
+    const t2 = Date.now();
     const row = await transcriptionDatabase.save({
       originalText,
-      processedText,
+      processedText: cleanup.text,
       isProcessed: settings.cleanupEnabled,
       processingMethod: cleanup.method,
       agentName: settings.cleanupEnabled ? settings.agentName : null,
       error: null,
     });
+    const dbMs = Date.now() - t2;
+    log.info("Pipeline stage: DB save complete", { dbMs, recordId: row.id });
+    windows.sendTranscriptionSaved();
 
-    return { text: processedText, originalText, record: row };
+    log.info("IPC transcribe:local-whisper — pipeline complete", {
+      totalMs: Date.now() - pipelineStart,
+      transcribeMs,
+      cleanupMs,
+      dbMs,
+    });
+
+    return { text: cleanup.text, originalText, record: row };
   });
 
-  ipcMain.handle("paste:text", (_, text: string) => {
+  ipcMain.handle("paste:text", async (_, text: string) => {
     log.info("IPC paste:text", { text });
+    await windows.prepareOverlayForPaste();
     return pasteText(text);
   });
 
@@ -84,6 +135,19 @@ export function registerIpc(): void {
   ipcMain.handle("panel:open", () => {
     log.debug("IPC panel:open");
     windows.createSettings();
+  });
+
+  ipcMain.handle("permissions:request-microphone", async () => {
+    if (process.platform !== "darwin") {
+      log.debug("IPC permissions:request-microphone — non-macOS, no native request needed");
+      return { status: "unknown" };
+    }
+    const before = systemPreferences.getMediaAccessStatus("microphone");
+    log.info("IPC permissions:request-microphone — current status before request", { before });
+    const granted = await systemPreferences.askForMediaAccess("microphone");
+    const after = systemPreferences.getMediaAccessStatus("microphone");
+    log.info("IPC permissions:request-microphone — result", { granted, after });
+    return { granted, status: after };
   });
 
   ipcMain.handle("permissions:open", (_, kind: "microphone" | "accessibility" | "sound-input") => {
@@ -98,17 +162,31 @@ export function registerIpc(): void {
     return shell.openExternal(urls[kind]);
   });
 
+    ipcMain.handle("app:open-url", (_, url: string) => {
+      log.debug("IPC app:open-url", { url });
+      return shell.openExternal(url);
+    });
+
   ipcMain.handle("runtime:status", () => {
     const status = getRuntimeStatus();
     log.debug("IPC runtime:status", status);
     return status;
   });
+
+  ipcMain.handle("log:write", (_, entry: unknown) => {
+    logRendererEntry(entry);
+  });
+
+  ipcMain.handle("log:get-level", () => {
+    return getLogLevel();
+  });
 }
 
 export function registerInitialHotkey(): void {
   log.debug("Registering initial hotkey");
-  hotkeyRegistered = registerDictationHotkey(settingsStore.get().hotkey, () => windows.sendDictationToggle());
-  log.info("Initial hotkey registered", { hotkeyRegistered });
+  const settings = settingsStore.get();
+  configureDictationHotkey(settings);
+  log.info("Initial hotkey registered", { hotkeyRegistered, hotkey: settings.hotkey, mode: settings.mode });
 }
 
 export function getRuntimeStatus(): RuntimeStatus {
@@ -144,6 +222,84 @@ function shouldRefreshWhisper(patch: Partial<AppSettings>): boolean {
     "selectedModel" in patch ||
     "whisperPort" in patch
   );
+}
+
+function configureDictationHotkey(settings: AppSettings): void {
+  resetPushHotkeyState();
+  hotkeyRegistered = registerDictationHotkey(settings.hotkey, handleHotkeyDown);
+  globeKeyManager.stop();
+
+  if (isGlobeLikeHotkey(settings.hotkey)) {
+    globeKeyManager.start({
+      onDown: handleHotkeyDown,
+      onUp: handleHotkeyUp,
+    });
+  }
+}
+
+function handleHotkeyDown(): void {
+  const settings = settingsStore.get();
+  if (settings.mode === "push-to-talk" && isGlobeLikeHotkey(settings.hotkey)) {
+    startPushHold();
+    return;
+  }
+
+  if (settings.mode === "push-to-talk") {
+    log.warn("Push-to-talk release events are unavailable for this hotkey; falling back to tap behavior", {
+      hotkey: settings.hotkey,
+    });
+  }
+  windows.sendDictationToggle();
+}
+
+function handleHotkeyUp(): void {
+  const settings = settingsStore.get();
+  if (settings.mode !== "push-to-talk" || !isGlobeLikeHotkey(settings.hotkey)) return;
+
+  pushKeyDownAt = 0;
+  pushLastStopAt = Date.now();
+  if (!pushKeyIsRecording) return;
+
+  pushKeyIsRecording = false;
+  log.debug("Stopping dictation after push-to-talk release");
+  windows.sendDictationStop();
+}
+
+function startPushHold(): void {
+  const now = Date.now();
+  if (now - pushLastStopAt < PUSH_STOP_COOLDOWN_MS) {
+    log.debug("Ignoring push-to-talk press during cooldown");
+    return;
+  }
+
+  const pressStartedAt = now;
+  pushKeyDownAt = pressStartedAt;
+  pushKeyIsRecording = false;
+  windows.showDictationPanel();
+
+  setTimeout(() => {
+    const settings = settingsStore.get();
+    if (
+      pushKeyDownAt === pressStartedAt &&
+      !pushKeyIsRecording &&
+      settings.mode === "push-to-talk" &&
+      isGlobeLikeHotkey(settings.hotkey)
+    ) {
+      pushKeyIsRecording = true;
+      log.debug("Starting dictation after push-to-talk hold threshold");
+      windows.sendDictationStart();
+    }
+  }, PUSH_HOLD_START_DELAY_MS);
+}
+
+function resetPushHotkeyState(): void {
+  pushKeyDownAt = 0;
+  pushKeyIsRecording = false;
+  pushLastStopAt = 0;
+}
+
+function isGlobeLikeHotkey(hotkey: string): boolean {
+  return hotkey === "GLOBE" || hotkey === "Fn";
 }
 
 function getMicrophoneStatus(): RuntimeStatus["microphone"] {

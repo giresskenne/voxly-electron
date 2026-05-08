@@ -1,38 +1,75 @@
-import { clipboard, nativeImage } from "electron";
-import { execFile } from "node:child_process";
+import { app, clipboard, systemPreferences, type NativeImage } from "electron";
+import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, chmodSync, constants, statSync } from "node:fs";
 import path from "node:path";
-import { app } from "electron";
 import { createMainLogger } from "../debug-log";
 
 const log = createMainLogger("paste");
 
-export async function pasteText(text: string): Promise<{ ok: boolean; fallback: boolean; message?: string }> {
+const PASTE_DELAYS = {
+  darwin: 120,
+  win32: 10,
+  linux: 50,
+};
+
+const RESTORE_DELAYS = {
+  darwin: 450,
+  win32: 80,
+  linux: 200,
+};
+
+type PasteResult = { ok: boolean; fallback: boolean; message?: string };
+
+type ClipboardSnapshot =
+  | { type: "image"; data: NativeImage }
+  | { type: "html"; text: string; html: string }
+  | { type: "text"; data: string };
+
+export async function pasteText(text: string): Promise<PasteResult> {
   log.info("Paste requested", { textLength: text.length });
-  const previousText = clipboard.readText();
-  const previousImage = clipboard.readImage();
-  log.debug("Captured previous clipboard", { previousTextLength: previousText.length, hadImage: !previousImage.isEmpty() });
+  const previousClipboard = saveClipboard();
+  log.debug("Captured previous clipboard", clipboardSnapshotMeta(previousClipboard));
   clipboard.writeText(text);
 
-  const result = await invokeNativePaste();
-  log.info("Native paste result", result);
-  setTimeout(() => {
-    if (!previousImage.isEmpty()) {
-      clipboard.writeImage(previousImage);
-      log.debug("Restored previous clipboard image");
-      return;
-    }
-    clipboard.writeText(previousText);
-    log.debug("Restored previous clipboard text", { previousTextLength: previousText.length });
-  }, 650);
-
-  return result;
+  try {
+    const result = await invokeNativePaste();
+    log.info("Native paste result", result);
+    setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    return result;
+  } catch (error) {
+    log.error("Native paste failed", error);
+    return {
+      ok: false,
+      fallback: true,
+      message: error instanceof Error ? error.message : "Native paste failed. Text is on the clipboard.",
+    };
+  }
 }
 
-async function invokeNativePaste(): Promise<{ ok: boolean; fallback: boolean; message?: string }> {
+async function invokeNativePaste(): Promise<PasteResult> {
   const binary = resolvePasteBinary();
   log.debug("Resolved paste binary", { binary });
+
+  if (process.platform === "darwin") {
+    const trusted = systemPreferences.isTrustedAccessibilityClient(false);
+    if (!trusted) {
+      log.warn("Paste requested without Accessibility trust");
+      systemPreferences.isTrustedAccessibilityClient(true);
+      return {
+        ok: false,
+        fallback: true,
+        message:
+          "Accessibility permission required. Please allow Voxly (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
+      };
+    }
+  }
+
   if (!binary) {
     log.warn("No native paste binary for this platform; falling back to clipboard-only paste");
+    if (process.platform === "darwin") {
+      await pasteMacOsWithOsascript();
+      return { ok: true, fallback: true };
+    }
     return {
       ok: true,
       fallback: true,
@@ -40,21 +77,18 @@ async function invokeNativePaste(): Promise<{ ok: boolean; fallback: boolean; me
     };
   }
 
-  return new Promise((resolve) => {
-    execFile(binary, (error) => {
-      if (error) {
-        log.error("Native paste binary failed", error);
-        resolve({
-          ok: false,
-          fallback: true,
-          message: "Native paste failed. Text is on the clipboard.",
-        });
-        return;
-      }
-      log.debug("Native paste binary completed");
-      resolve({ ok: true, fallback: false });
-    });
-  });
+  try {
+    await runPasteBinary(binary);
+    log.debug("Native paste binary completed");
+    return { ok: true, fallback: false };
+  } catch (error) {
+    if (process.platform === "darwin") {
+      log.warn("Paste binary failed; falling back to osascript", error);
+      await pasteMacOsWithOsascript();
+      return { ok: true, fallback: true };
+    }
+    throw error;
+  }
 }
 
 function resolvePasteBinary(): string | null {
@@ -65,11 +99,154 @@ function resolvePasteBinary(): string | null {
   };
   const name = byPlatform[process.platform];
   if (!name) return null;
-  const candidate = app.isPackaged
-    ? path.join(process.resourcesPath, "bin", name)
-    : path.join(app.getAppPath(), "resources", "bin", name);
-  log.debug("Paste binary candidate", { platform: process.platform, candidate });
-  return candidate;
+
+  const candidates = new Set<string>([
+    path.join(app.getAppPath(), "resources", "bin", name),
+    path.join(app.getAppPath(), "resources", name),
+    path.join(__dirname, "../../../resources/bin", name),
+    path.join(__dirname, "../../../resources", name),
+  ]);
+
+  if (process.resourcesPath) {
+    [
+      path.join(process.resourcesPath, "bin", name),
+      path.join(process.resourcesPath, name),
+      path.join(process.resourcesPath, "resources", "bin", name),
+      path.join(process.resourcesPath, "resources", name),
+      path.join(process.resourcesPath, "app.asar.unpacked", "resources", "bin", name),
+      path.join(process.resourcesPath, "app.asar.unpacked", "resources", name),
+    ].forEach((candidate) => candidates.add(candidate));
+  }
+
+  for (const candidate of candidates) {
+    log.debug("Paste binary candidate", { platform: process.platform, candidate });
+    try {
+      const stats = statSync(candidate);
+      if (!stats.isFile()) continue;
+      try {
+        accessSync(candidate, constants.X_OK);
+      } catch {
+        chmodSync(candidate, 0o755);
+      }
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
 }
 
-void nativeImage;
+function runPasteBinary(binary: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const child = spawn(binary, [], { stdio: ["ignore", "pipe", "pipe"] });
+      waitForPasteProcess(child, 3000).then(resolve).catch(reject);
+    }, pasteDelay());
+  });
+}
+
+function pasteMacOsWithOsascript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const child = spawn("osascript", [
+        "-e",
+        'tell application "System Events" to key code 9 using command down',
+      ]);
+      waitForPasteProcess(child, 3000).then(resolve).catch(reject);
+    }, PASTE_DELAYS.darwin);
+  });
+}
+
+function waitForPasteProcess(child: ChildProcess, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+      child.removeAllListeners();
+      reject(new Error("Paste operation timed out. Text is on the clipboard."));
+    }, timeoutMs);
+
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+
+    child.on("close", (code) => {
+      if (timedOut) return;
+      clearTimeout(timeout);
+      child.removeAllListeners();
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      if (code === 2 && process.platform === "darwin") {
+        systemPreferences.isTrustedAccessibilityClient(true);
+        reject(
+          new Error(
+            "Accessibility permission required. Please allow Voxly (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
+          ),
+        );
+        return;
+      }
+      reject(new Error(`Paste failed${code === null ? "" : ` with code ${code}`}${stderr ? `: ${stderr.trim()}` : ""}. Text is on the clipboard.`));
+    });
+
+    child.on("error", (error) => {
+      if (timedOut) return;
+      clearTimeout(timeout);
+      child.removeAllListeners();
+      reject(new Error(`Paste command failed: ${error.message}. Text is on the clipboard.`));
+    });
+  });
+}
+
+function saveClipboard(): ClipboardSnapshot {
+  const formats = clipboard.availableFormats();
+  if (formats.some((format) => format.startsWith("image/"))) {
+    return { type: "image", data: clipboard.readImage() };
+  }
+  if (formats.includes("text/html")) {
+    return { type: "html", text: clipboard.readText(), html: clipboard.readHTML() };
+  }
+  return { type: "text", data: clipboard.readText() };
+}
+
+function restoreClipboard(snapshot: ClipboardSnapshot): void {
+  if (snapshot.type === "image") {
+    if (!snapshot.data.isEmpty()) clipboard.writeImage(snapshot.data);
+    log.debug("Restored previous clipboard image");
+    return;
+  }
+  if (snapshot.type === "html") {
+    clipboard.write({ text: snapshot.text, html: snapshot.html });
+    log.debug("Restored previous clipboard HTML", { previousTextLength: snapshot.text.length });
+    return;
+  }
+  clipboard.writeText(snapshot.data);
+  log.debug("Restored previous clipboard text", { previousTextLength: snapshot.data.length });
+}
+
+function clipboardSnapshotMeta(snapshot: ClipboardSnapshot): Record<string, unknown> {
+  if (snapshot.type === "image") {
+    return { type: snapshot.type, hadImage: !snapshot.data.isEmpty() };
+  }
+  if (snapshot.type === "html") {
+    return { type: snapshot.type, previousTextLength: snapshot.text.length, previousHtmlLength: snapshot.html.length };
+  }
+  return { type: snapshot.type, previousTextLength: snapshot.data.length };
+}
+
+function pasteDelay(): number {
+  if (process.platform === "darwin") return PASTE_DELAYS.darwin;
+  if (process.platform === "win32") return PASTE_DELAYS.win32;
+  return PASTE_DELAYS.linux;
+}
+
+function restoreDelay(): number {
+  if (process.platform === "darwin") return RESTORE_DELAYS.darwin;
+  if (process.platform === "win32") return RESTORE_DELAYS.win32;
+  return RESTORE_DELAYS.linux;
+}

@@ -2,50 +2,78 @@ import { motion } from "framer-motion";
 import {
   ArrowLeft,
   ArrowRight,
+  BarChart2,
+  BookOpen,
   Check,
   CheckCircle2,
   ChevronRight,
   Circle,
-  Command,
-  Copy,
-  Disc3,
-  KeyRound,
+  Globe,
+  HelpCircle,
+  Home,
   LockKeyhole,
   Mic,
   MousePointerClick,
-  Radio,
+  Plus,
   RefreshCw,
+  Search,
+  Settings,
+  Shield,
   ShieldAlert,
   Sparkles,
-  ToggleLeft,
+  Star,
+  Trash2,
+  UserCircle,
+  Users,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AppSettings, RuntimeStatus, TranscriptionRecord } from "../../main/types";
 import { BrandMark } from "../components/BrandMark";
 import { TextButton } from "../components/Controls";
-import { brand, modelOptions, overviewStats, shellNav, writingModes } from "../design/source";
+import { modelOptions } from "../design/source";
 import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 
 const log = createRendererLogger("settings-ui");
+const hotkeyModeOptions: Array<{
+  value: AppSettings["mode"];
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}> = [
+  {
+    value: "tap-to-talk",
+    label: "Press twice",
+    description: "Press once to start, then press again to stop.",
+    icon: MousePointerClick,
+  },
+  {
+    value: "push-to-talk",
+    label: "Press and hold",
+    description: "Hold the hotkey while speaking, release to stop.",
+    icon: Mic,
+  },
+];
 
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [history, setHistory] = useState<TranscriptionRecord[]>([]);
-  const [activeSection, setActiveSection] = useState("overview");
-  const [groqApiKeyInput, setGroqApiKeyInput] = useState("");
-  const [openaiApiKeyInput, setOpenaiApiKeyInput] = useState("");
-  const dictionary = useMemo(() => settings?.customDictionary.join(", ") ?? "", [settings]);
+  const [activeSection, setActiveSection] = useState("home");
 
   useEffect(() => {
     log.info("Settings app mounted");
     void refresh();
-    const off = window.electronAPI.onRuntimeStatus(setRuntime);
+    const offRuntime = window.electronAPI.onRuntimeStatus(setRuntime);
+    const offSaved = window.electronAPI.onTranscriptionSaved(() => {
+      window.electronAPI.listHistory(20).then(setHistory);
+    });
     return () => {
       log.info("Settings app unmounted");
-      off();
+      offRuntime();
+      offSaved();
     };
   }, []);
 
@@ -74,16 +102,6 @@ export function SettingsApp() {
     log.info("Settings patch applied", patch);
   }
 
-  async function saveCredentials() {
-    const patch: Partial<AppSettings> = {};
-    if (groqApiKeyInput.trim()) patch.groqApiKey = groqApiKeyInput;
-    if (openaiApiKeyInput.trim()) patch.openaiApiKey = openaiApiKeyInput;
-    if (Object.keys(patch).length === 0) return;
-
-    await patchSettings(patch);
-    setGroqApiKeyInput("");
-    setOpenaiApiKeyInput("");
-  }
 
   if (!settings || !runtime) {
     return <div className="app-loading">Loading Voxly...</div>;
@@ -102,265 +120,513 @@ export function SettingsApp() {
   }
 
   return (
-    <main className="settings-shell">
-      <aside className="settings-sidebar glass-panel-strong">
-        <BrandMark />
-        <nav className="sidebar-nav" aria-label="Voxly sections">
-          {shellNav.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={cn("sidebar-nav__item", activeSection === item.id && "is-active")}
-              onClick={() => {
-                log.debug("Sidebar section selected", { section: item.id });
-                setActiveSection(item.id);
-                document.getElementById(item.id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-            >
-              <item.icon size={18} />
-              <span>{item.label}</span>
-              <ChevronRight size={15} />
-            </button>
-          ))}
+    <main className="voxly-shell">
+      <aside className="voxly-sidebar">
+        {/* Logo */}
+        <div className="voxly-sidebar__brand">
+          <BrandMark />
+        </div>
+
+        {/* Primary nav */}
+        <nav className="voxly-nav" aria-label="Main navigation">
+          {(["home", "insights", "dictionary"] as const).map((tab) => {
+            const Icon = tab === "home" ? Home : tab === "insights" ? BarChart2 : BookOpen;
+            const label = tab === "home" ? "Home" : tab === "insights" ? "Insights" : "Dictionary";
+            return (
+              <button
+                key={tab}
+                type="button"
+                className={cn("voxly-nav__item", activeSection === tab && "is-active")}
+                onClick={() => {
+                  log.debug("Tab selected", { tab });
+                  setActiveSection(tab);
+                }}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+              </button>
+            );
+          })}
         </nav>
+
+        {/* Spacer */}
+        <div className="voxly-sidebar__spacer" />
+
+        {/* Upgrade card */}
+        <div className="voxly-upgrade-card">
+          <div className="voxly-upgrade-card__header">
+            <span>Free plan</span>
+          </div>
+          <div className="voxly-upgrade-card__usage">
+            <div className="voxly-upgrade-card__bar">
+              <div className="voxly-upgrade-card__bar-fill" style={{ width: "40%" }} />
+            </div>
+            <p>400 / 1,000 words remaining</p>
+          </div>
+          <button type="button" className="voxly-upgrade-btn">
+            <Star size={14} />
+            Upgrade to Pro
+          </button>
+        </div>
+
+        {/* Secondary links */}
+        <nav className="voxly-secondary-nav" aria-label="Secondary navigation">
+          <button
+            type="button"
+            className="voxly-secondary-nav__item"
+            onClick={() => setActiveSection("settings")}
+          >
+            <Users size={16} />
+            <span>Invite a friend</span>
+          </button>
+          <button
+            type="button"
+            className={cn("voxly-secondary-nav__item", activeSection === "settings" && "is-active")}
+            onClick={() => setActiveSection("settings")}
+          >
+            <Settings size={16} />
+            <span>Settings</span>
+          </button>
+          <button
+            type="button"
+            className="voxly-secondary-nav__item"
+              onClick={() => window.electronAPI.openURL("https://dictafun.com/privacy")}
+          >
+            <Shield size={16} />
+            <span>Privacy</span>
+          </button>
+            <button
+              type="button"
+              className="voxly-secondary-nav__item"
+              onClick={() => window.electronAPI.openURL("https://dictafun.com/terms")}
+            >
+            <HelpCircle size={16} />
+              <span>Terms</span>
+          </button>
+        </nav>
+
+        {/* Profile */}
+        <button
+          type="button"
+          className="voxly-profile"
+          onClick={() => setActiveSection("settings")}
+          aria-label="Account settings"
+        >
+          <div className="voxly-profile__avatar">
+            <UserCircle size={22} />
+          </div>
+          <div className="voxly-profile__info">
+            <span className="voxly-profile__name">{settings.agentName || "Your account"}</span>
+            <span className="voxly-profile__plan">Free plan</span>
+          </div>
+        </button>
       </aside>
 
-      <section className="settings-main">
-        <header className="settings-hero glass-panel-strong">
-          <div className="hero-copy">
-            <div className="eyebrow">
-              <span className="status-dot" data-state={runtime.whisper === "ready" ? "complete" : "processing"} />
-              {brand.tagline}
-            </div>
-            <h1>
-              Speak naturally.
-              <span> Voxly writes anywhere.</span>
-            </h1>
-            <p>
-              A desktop dictation overlay with local-first transcription, cleanup controls, model management, and a browsable history.
-            </p>
-          </div>
-          <div className="hero-actions">
-            <TextButton variant="primary" onClick={() => refresh()}>
-              <RefreshCw size={17} />
-              Refresh
-            </TextButton>
-            <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
-              <Mic size={17} />
-              Mic Settings...
-            </TextButton>
-          </div>
-        </header>
-
-        <div className="content-grid">
-          <section className="panel glass-panel" id="overview">
-            <PanelHeader icon={Radio} title="Runtime" subtitle="Current desktop services" />
-            <div className="runtime-grid">
-              <RuntimePill label="Hotkey" value={runtime.hotkeyRegistered ? "Registered" : "Failed"} ok={runtime.hotkeyRegistered} />
-              <RuntimePill
-                label="Whisper"
-                value={runtime.whisper}
-                ok={runtime.whisper === "ready" || runtime.whisper === "mock" || runtime.whisper === "disabled"}
-              />
-              <RuntimePill label="Microphone" value={runtime.microphone} ok={runtime.microphone !== "denied"} />
-              <RuntimePill label="Accessibility" value={runtime.accessibility} ok={runtime.accessibility !== "denied"} />
-            </div>
-            <div className="stats-grid">
-              {overviewStats.map((stat) => (
-                <article key={stat.label} className="stat-card glass-panel-subtle">
-                  <strong>{stat.value}</strong>
-                  <span>{stat.label}</span>
-                  <p>{stat.detail}</p>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel glass-panel" id="dictation">
-            <PanelHeader icon={Mic} title="Dictation" subtitle="Overlay behavior and prompt context" />
-            <div className="field-grid">
-              <label className="field">
-                <span>Transcription</span>
-                <select
-                  value={settings.transcriptionMode}
-                  onChange={(event) => patchSettings({ transcriptionMode: event.target.value as AppSettings["transcriptionMode"] })}
-                >
-                  <option value="local">Local whisper.cpp</option>
-                  <option value="cloud">Groq cloud</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Mode</span>
-                <select value={settings.mode} onChange={(event) => patchSettings({ mode: event.target.value as AppSettings["mode"] })}>
-                  <option value="tap-to-talk">Tap to talk</option>
-                  <option value="push-to-talk">Push to talk</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Language</span>
-                <input value={settings.language} onChange={(event) => patchSettings({ language: event.target.value })} />
-              </label>
-              <label className="field field--wide">
-                <span>Custom dictionary</span>
-                <textarea
-                  value={dictionary}
-                  onChange={(event) =>
-                    patchSettings({
-                      customDictionary: event.target.value.split(",").map((item) => item.trim()).filter(Boolean),
-                    })
-                  }
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="panel glass-panel" id="models">
-            <PanelHeader icon={Disc3} title="Models" subtitle="Local whisper.cpp server target" />
-            <div className="model-grid">
-              {modelOptions.map((model) => (
-                <button
-                  key={model.id}
-                  type="button"
-                  className={cn("model-card glass-panel-subtle", settings.selectedModel === model.id && "is-selected")}
-                  onClick={() => patchSettings({ selectedModel: model.id })}
-                >
-                  <span>{model.label}</span>
-                  <small>{model.speed}</small>
-                  <small>{model.quality}</small>
-                  {settings.selectedModel === model.id && <Check size={16} />}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel glass-panel" id="cleanup">
-            <PanelHeader icon={Sparkles} title="Cleanup" subtitle="Post-transcription processing" />
-            <div className="mode-row">
-              {writingModes.map((mode) => (
-                <article key={mode.id} className="writing-mode glass-panel-subtle">
-                  <mode.icon size={20} />
-                  <strong>{mode.label}</strong>
-                  <p>{mode.description}</p>
-                </article>
-              ))}
-            </div>
-            <label className="switch-row">
-              <ToggleLeft size={22} />
-              <span>Cleanup enabled</span>
-              <input
-                type="checkbox"
-                checked={settings.cleanupEnabled}
-                onChange={(event) => patchSettings({ cleanupEnabled: event.target.checked })}
-              />
-            </label>
-          </section>
-
-          <section className="panel glass-panel" id="hotkeys">
-            <PanelHeader icon={KeyRound} title="Hotkey" subtitle="Global shortcut" />
-            <div className="field-grid">
-              <label className="field field--wide">
-                <span>Accelerator</span>
-                <input value={settings.hotkey} onChange={(event) => patchSettings({ hotkey: event.target.value })} />
-              </label>
-            </div>
-          </section>
-
-          <section className="panel glass-panel" id="permissions">
-            <PanelHeader icon={ShieldAlert} title="Permissions" subtitle="OS access required for dictation" />
-            <div className="permission-row">
-              <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
-                <Mic size={17} />
-                Microphone...
-              </TextButton>
-              <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-                <ShieldAlert size={17} />
-                Accessibility...
-              </TextButton>
-            </div>
-          </section>
-
-          <section className="panel glass-panel" id="settings">
-            <PanelHeader icon={Command} title="Settings" subtitle="Advanced app behavior" />
-            <div className="field-grid">
-              <label className="field">
-                <span>Agent Name</span>
-                <input value={settings.agentName} onChange={(event) => patchSettings({ agentName: event.target.value })} />
-              </label>
-              <div className="field">
-                <span>Groq API Key</span>
-                <input
-                  type="password"
-                  value={groqApiKeyInput}
-                  placeholder={settings.groqApiKeyConfigured ? "Saved securely" : "Uses GROQ_API_KEY if empty"}
-                  onChange={(event) => setGroqApiKeyInput(event.target.value)}
-                />
-              </div>
-              <div className="field">
-                <span>OpenAI API Key</span>
-                <input
-                  type="password"
-                  value={openaiApiKeyInput}
-                  placeholder={settings.openaiApiKeyConfigured ? "Saved securely" : "Uses OPENAI_API_KEY if empty"}
-                  onChange={(event) => setOpenaiApiKeyInput(event.target.value)}
-                />
-              </div>
-              <div className="field">
-                <span>Credentials</span>
-                <TextButton
-                  onClick={() => void saveCredentials()}
-                  disabled={!groqApiKeyInput.trim() && !openaiApiKeyInput.trim()}
-                >
-                  <Check size={17} />
-                  Save API Keys
-                </TextButton>
-              </div>
-              <label className="field">
-                <span>OpenAI Base URL</span>
-                <input
-                  value={settings.openaiBaseUrl}
-                  onChange={(event) => patchSettings({ openaiBaseUrl: event.target.value })}
-                />
-              </label>
-              <label className="field">
-                <span>Whisper Port</span>
-                <input
-                  type="number"
-                  min={1024}
-                  max={65535}
-                  value={settings.whisperPort}
-                  onChange={(event) => patchSettings({ whisperPort: Number(event.target.value) })}
-                />
-              </label>
-              <label className="switch-row switch-row--inset field--wide">
-                <Radio size={20} />
-                <span>Use mock transcription while developing</span>
-                <input
-                  type="checkbox"
-                  checked={settings.mockTranscription}
-                  onChange={(event) => patchSettings({ mockTranscription: event.target.checked })}
-                />
-              </label>
-            </div>
-          </section>
-
-          <section className="panel glass-panel panel--wide" id="history">
-            <PanelHeader icon={Copy} title="History" subtitle="Recent local transcriptions" />
-            <div className="history-list">
-              {history.length === 0 ? (
-                <p className="empty-state">No transcriptions yet.</p>
-              ) : (
-                history.map((row) => (
-                  <motion.article key={row.id} className="history-item glass-panel-subtle" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>
-                    <time>{new Date(row.timestamp).toLocaleString()}</time>
-                    <p>{row.processedText || row.originalText}</p>
-                  </motion.article>
-                ))
-              )}
-            </div>
-          </section>
-        </div>
+      <section className="voxly-main">
+        {activeSection === "home" && (
+          <HomePage history={history} settings={settings} />
+        )}
+        {activeSection === "insights" && (
+          <InsightsPage history={history} />
+        )}
+        {activeSection === "dictionary" && (
+          <DictionaryPage settings={settings} onPatchSettings={patchSettings} />
+        )}
+        {activeSection === "settings" && (
+          <SettingsPage settings={settings} runtime={runtime} onPatchSettings={patchSettings} />
+        )}
       </section>
     </main>
+  );
+}
+
+// ── Hotkey display chip ───────────────────────────────────────────────────────
+
+function HotkeyChip({ hotkey }: { hotkey: string }) {
+  if (hotkey === "GLOBE" || hotkey === "Fn") {
+    return (
+      <div className="home-banner__shortcut-keys">
+        <span className="home-banner__shortcut-press">Press</span>
+        {/* FN-only key */}
+        <span className="home-banner__key-chip home-banner__key-chip--fn">FN</span>
+        <span className="home-banner__shortcut-or">or</span>
+        {/* Combined fn + globe key matching physical macOS key layout */}
+        <span className="home-banner__key-chip home-banner__key-chip--globe">
+          <span className="home-banner__key-chip-fn">fn</span>
+          <Globe size={12} className="home-banner__key-chip-globe" />
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="home-banner__shortcut-keys">
+      <span className="home-banner__shortcut-press">Press</span>
+      <span className="home-banner__key">{hotkey}</span>
+    </div>
+  );
+}
+
+// ── Home Page ─────────────────────────────────────────────────────────────────
+
+function HomePage({ history, settings }: { history: TranscriptionRecord[]; settings: AppSettings }) {
+  return (
+    <div className="voxly-page">
+      {/* Hero banner */}
+      <div className="home-banner">
+        <div className="home-banner__copy">
+          <h1>Speak naturally.<br /><span>Voxly writes it clearly.</span></h1>
+          <p>Press the shortcut or start a recording to turn your thoughts into polished text.</p>
+        </div>
+        <div className="home-banner__actions">
+          <TextButton variant="primary" onClick={() => window.electronAPI.openPanel()}>
+            <Mic size={17} />
+            Start speaking
+          </TextButton>
+        </div>
+        <div className="home-banner__shortcut">
+          <HotkeyChip hotkey={settings.hotkey} />
+        </div>
+      </div>
+
+      {/* History list */}
+      <div className="voxly-section-header">
+        <h2>Recent dictations</h2>
+      </div>
+
+      {history.length === 0 ? (
+        <div className="voxly-empty-state">
+          <Mic size={36} />
+          <p>No dictations yet.</p>
+          <small>Your transcription history will appear here.</small>
+        </div>
+      ) : (
+        <div className="home-history">
+          {history.map((row, i) => {
+            const text = row.processedText ?? row.originalText;
+            const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+            const date = new Date(row.timestamp);
+            const isProcessed = row.isProcessed;
+            return (
+              <motion.article
+                key={row.id}
+                className="home-history__item"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.04 }}
+              >
+                <div className="home-history__meta">
+                  <time className="home-history__time">
+                    {date.toLocaleDateString(undefined, { month: "short", day: "numeric" })},{" "}
+                    {date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+                  </time>
+                  {isProcessed && (
+                    <span className="home-history__badge home-history__badge--cleaned">
+                      Cleaned
+                    </span>
+                  )}
+                  <span className="home-history__words">{wordCount} words</span>
+                </div>
+                <p className="home-history__preview">{text}</p>
+              </motion.article>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Insights Page ─────────────────────────────────────────────────────────────
+
+function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
+  const totalWords = history.reduce((sum, row) => {
+    const text = row.processedText ?? row.originalText;
+    return sum + text.trim().split(/\s+/).filter(Boolean).length;
+  }, 0);
+  const totalDictations = history.length;
+  const cleanedCount = history.filter((r) => r.isProcessed).length;
+
+  const hasData = totalDictations > 0;
+
+  return (
+    <div className="voxly-page">
+      <div className="voxly-section-header">
+        <h2>Your insights</h2>
+        <p>A summary of how you've been using Voxly.</p>
+      </div>
+
+      {!hasData ? (
+        <div className="voxly-empty-state">
+          <BarChart2 size={36} />
+          <p>No data yet.</p>
+          <small>Start dictating to see your usage stats here.</small>
+        </div>
+      ) : (
+        <>
+          <div className="insights-grid">
+            <MetricCard
+              label="Total dictations"
+              value={String(totalDictations)}
+              detail="Sessions recorded"
+            />
+            <MetricCard
+              label="Total words"
+              value={totalWords >= 1000 ? `${(totalWords / 1000).toFixed(1)}k` : String(totalWords)}
+              detail="Words spoken"
+            />
+            <MetricCard
+              label="Cleaned"
+              value={String(cleanedCount)}
+              detail="Dictations polished by AI"
+            />
+            <MetricCard
+              label="Time saved"
+              value={`~${Math.round(totalWords / 130)} min`}
+              detail="vs. typing at 40 wpm"
+            />
+          </div>
+
+          <div className="voxly-section-header" style={{ marginTop: 28 }}>
+            <h2>Recent activity</h2>
+          </div>
+          <div className="insights-activity">
+            {history.slice(0, 7).map((row) => {
+              const text = row.processedText ?? row.originalText;
+              const words = text.trim().split(/\s+/).filter(Boolean).length;
+              const date = new Date(row.timestamp);
+              return (
+                <div key={row.id} className="insights-activity__row">
+                  <span className="insights-activity__date">
+                    {date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                  </span>
+                  <div className="insights-activity__bar-wrap">
+                    <div
+                      className="insights-activity__bar"
+                      style={{ width: `${Math.min(100, (words / Math.max(1, totalWords / history.length)) * 50)}%` }}
+                    />
+                  </div>
+                  <span className="insights-activity__words">{words} words</span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MetricCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <article className="metric-card">
+      <strong className="metric-card__value">{value}</strong>
+      <span className="metric-card__label">{label}</span>
+      <p className="metric-card__detail">{detail}</p>
+    </article>
+  );
+}
+
+// ── Dictionary Page ───────────────────────────────────────────────────────────
+
+function DictionaryPage({
+  settings,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  const [search, setSearch] = useState("");
+  const [newWord, setNewWord] = useState("");
+
+  const words = settings.customDictionary;
+  const filtered = words.filter((w) => w.toLowerCase().includes(search.toLowerCase()));
+
+  function addWord() {
+    const trimmed = newWord.trim();
+    if (!trimmed || words.includes(trimmed)) return;
+    void onPatchSettings({ customDictionary: [...words, trimmed] });
+    setNewWord("");
+  }
+
+  function removeWord(word: string) {
+    void onPatchSettings({ customDictionary: words.filter((w) => w !== word) });
+  }
+
+  return (
+    <div className="voxly-page">
+      {/* Explainer banner */}
+      <div className="dict-banner">
+        <div className="dict-banner__icon">
+          <BookOpen size={22} />
+        </div>
+        <div>
+          <h3>Voxly learns the words you use.</h3>
+          <p>Add names, company terms, acronyms, and phrases so Voxly writes them correctly every time.</p>
+        </div>
+      </div>
+
+      {/* Controls row */}
+      <div className="dict-controls">
+        <div className="dict-search">
+          <Search size={15} />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search words…"
+            aria-label="Search dictionary"
+          />
+        </div>
+        <div className="dict-add">
+          <input
+            value={newWord}
+            onChange={(e) => setNewWord(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addWord()}
+            placeholder="Add a word or phrase…"
+            aria-label="New word"
+          />
+          <TextButton variant="primary" onClick={addWord} disabled={!newWord.trim()}>
+            <Plus size={16} />
+            Add
+          </TextButton>
+        </div>
+      </div>
+
+      {/* Word list */}
+      {filtered.length === 0 ? (
+        <div className="voxly-empty-state">
+          <BookOpen size={36} />
+          <p>{words.length === 0 ? "No words yet." : "No matches."}</p>
+          <small>
+            {words.length === 0
+              ? "Add words Voxly should recognise — names, brands, or technical terms."
+              : "Try a different search."}
+          </small>
+        </div>
+      ) : (
+        <div className="dict-list">
+          {filtered.map((word) => (
+            <div key={word} className="dict-list__row">
+              <span className="dict-list__word">{word}</span>
+              <button
+                type="button"
+                className="dict-list__delete"
+                onClick={() => removeWord(word)}
+                aria-label={`Remove ${word}`}
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Settings Page (simplified) ────────────────────────────────────────────────
+
+function SettingsPage({
+  settings,
+  runtime,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  runtime: RuntimeStatus;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  return (
+    <div className="voxly-page">
+      <div className="voxly-section-header">
+        <h2>Settings</h2>
+        <p>Manage your Voxly preferences.</p>
+      </div>
+
+      <div className="settings-rows">
+        <div className="settings-row">
+          <div>
+            <h3>Your name</h3>
+            <p>How Voxly refers to you when cleaning up dictations.</p>
+          </div>
+          <input
+            className="settings-input"
+            value={settings.agentName}
+            onChange={(e) => void onPatchSettings({ agentName: e.target.value })}
+            placeholder="Your name"
+          />
+        </div>
+
+        <div className="settings-row">
+          <div>
+            <h3>Hotkey</h3>
+            <p>Global shortcut to start and stop dictation.</p>
+          </div>
+          <div className="settings-hotkey-display">
+            <HotkeyChip hotkey={settings.hotkey} />
+          </div>
+        </div>
+
+        <div className="settings-row settings-row--stacked">
+          <div>
+            <h3>Hotkey mode</h3>
+            <p>Choose how Voxly starts and stops recording from the global shortcut.</p>
+          </div>
+          <div className="settings-mode-options" role="radiogroup" aria-label="Hotkey mode">
+            {hotkeyModeOptions.map((option) => {
+              const Icon = option.icon;
+              return (
+                <label
+                  key={option.value}
+                  className={cn("settings-mode-option", settings.mode === option.value && "settings-mode-option--active")}
+                >
+                  <input
+                    type="radio"
+                    name="hotkey-mode"
+                    value={option.value}
+                    checked={settings.mode === option.value}
+                    onChange={() => void onPatchSettings({ mode: option.value })}
+                  />
+                  <Icon size={17} />
+                  <span>{option.label}</span>
+                  <small>{option.description}</small>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="settings-row">
+          <div>
+            <h3>Text cleanup</h3>
+            <p>Automatically polish punctuation and casing after you dictate.</p>
+          </div>
+          <label className="settings-toggle" aria-label="Toggle text cleanup">
+            <input
+              type="checkbox"
+              checked={settings.cleanupEnabled}
+              onChange={(e) => void onPatchSettings({ cleanupEnabled: e.target.checked })}
+            />
+            <span className="settings-toggle__track" />
+          </label>
+        </div>
+
+        <div className="settings-row">
+          <div>
+            <h3>Permissions</h3>
+            <p>Microphone and accessibility access required for dictation.</p>
+          </div>
+          <div className="settings-row__actions">
+            <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
+              <Mic size={16} />
+              Microphone…
+            </TextButton>
+            <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+              <ShieldAlert size={16} />
+              Accessibility…
+            </TextButton>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@ import { credentialStore } from "./credential-store";
 const log = createMainLogger("settings");
 
 const defaults: AppSettings = {
-  hotkey: "CommandOrControl+Shift+Space",
+  hotkey: process.platform === "darwin" ? "GLOBE" : "Control+Shift+Space",
   mode: "tap-to-talk",
   transcriptionMode: "local",
   selectedModel: "base",
@@ -22,7 +22,7 @@ const defaults: AppSettings = {
   openaiApiKeyConfigured: false,
   openaiBaseUrl: "https://api.openai.com/v1",
   whisperPort: 9999,
-  mockTranscription: true,
+  mockTranscription: false,
   onboardingComplete: false,
 };
 
