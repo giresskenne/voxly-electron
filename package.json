@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.0.3-fix-fixing-test-transcribe-on-onboarding.1",
+  "version": "1.0.3",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
