@@ -40,6 +40,8 @@ npm run dev
 | Variable | Purpose |
 |---|---|
 | `VITE_API_URL` | Backend API base URL for auth, billing, cloud transcription, and cleanup |
+| `VITE_DESKTOP_UPDATES_URL` | Public URL for `desktop/latest/latest.json`, used by the app to detect newer desktop releases |
+| `VITE_DESKTOP_DOWNLOAD_BASE_URL` | Optional public base URL for installer downloads; if omitted, the app derives it from `VITE_DESKTOP_UPDATES_URL` |
 | `VOXLY_DEBUG` | Set to `1` to enable verbose IPC logging |
 
 `GROQ_API_KEY` and `OPENAI_API_KEY` should live on the backend in production, not in the desktop app. The app calls authenticated backend endpoints for cloud transcription and cleanup.

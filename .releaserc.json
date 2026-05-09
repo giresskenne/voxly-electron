@@ -7,27 +7,27 @@
     {
       "name": "feature/*",
       "channel": "pre",
-      "prerelease": "rc"
+      "prerelease": "${name.replace(/[^0-9A-Za-z-]/g, '-')}"
     },
     {
       "name": "feat/*",
       "channel": "pre",
-      "prerelease": "rc"
+      "prerelease": "${name.replace(/[^0-9A-Za-z-]/g, '-')}"
     },
     {
       "name": "fix/*",
       "channel": "pre",
-      "prerelease": "rc"
+      "prerelease": "${name.replace(/[^0-9A-Za-z-]/g, '-')}"
     },
     {
       "name": "chore/*",
       "channel": "pre",
-      "prerelease": "rc"
+      "prerelease": "${name.replace(/[^0-9A-Za-z-]/g, '-')}"
     },
     {
       "name": "hotfix/*",
       "channel": "pre",
-      "prerelease": "rc"
+      "prerelease": "${name.replace(/[^0-9A-Za-z-]/g, '-')}"
     }
   ],
   "plugins": [

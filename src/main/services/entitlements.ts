@@ -7,7 +7,7 @@ const log = createMainLogger("entitlements");
 const ENTITLEMENT_TTL_MS = 60_000;
 
 const PLAN_CAPABILITIES: Record<BillingPlan, { cloud: boolean; cleanup: boolean }> = {
-  free: { cloud: false, cleanup: false },
+  free: { cloud: false, cleanup: true },
   starter: { cloud: true, cleanup: true },
   pro: { cloud: true, cleanup: true },
 };
@@ -44,7 +44,7 @@ function makeDefault(reason: string): EntitlementStatus {
     billingPlan: "free",
     billingStatus: "unknown",
     canUseCloudTranscription: false,
-    canUseCleanup: false,
+    canUseCleanup: true,
     checkedAt: new Date().toISOString(),
     source: "default",
     reason,
@@ -126,7 +126,7 @@ export class EntitlementService {
         billingPlan,
         billingStatus,
         canUseCloudTranscription: paidAllowed && planCapabilities.cloud,
-        canUseCleanup: paidAllowed && planCapabilities.cleanup,
+        canUseCleanup: planCapabilities.cleanup,
         checkedAt: new Date().toISOString(),
         source: "remote",
       };

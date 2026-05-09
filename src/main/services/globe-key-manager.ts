@@ -88,8 +88,14 @@ export class GlobeKeyManager {
   }
 
   private resolveBinary(): string | null {
+    // In packaged builds, binaries land in Resources/bin/ via extraResources.
+    // Never reference app.getAppPath() in packaged mode — it points into app.asar
+    // which spawn() cannot execute (ENOTDIR).
     const candidates = app.isPackaged
-      ? [path.join(process.resourcesPath, "bin", BINARY_NAME)]
+      ? [
+          path.join(process.resourcesPath, "bin", BINARY_NAME),                                   // extraResources → Resources/bin/
+          path.join(process.resourcesPath, "app.asar.unpacked", "resources", "bin", BINARY_NAME), // asarUnpack fallback
+        ]
       : [
           path.join(app.getAppPath(), "resources", "bin", BINARY_NAME),
           path.join(__dirname, "../../../resources/bin", BINARY_NAME),

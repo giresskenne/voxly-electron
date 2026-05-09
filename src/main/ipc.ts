@@ -1,4 +1,4 @@
-import { ipcMain, shell, systemPreferences } from "electron";
+import { app, ipcMain, shell, systemPreferences } from "electron";
 import type { AppSettings, RuntimeStatus } from "./types";
 import { settingsStore } from "./services/settings-store";
 import { transcriptionDatabase } from "./services/database";
@@ -13,6 +13,7 @@ import { createMainLogger, getLogLevel, logRendererEntry } from "./debug-log";
 import type { AudioChunk } from "./types";
 import { entitlementService } from "./services/entitlements";
 import { billingService } from "./services/billing";
+import { updateChecker } from "./services/update-checker";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
@@ -114,6 +115,11 @@ export function registerIpc(): void {
   ipcMain.handle("history:list", (_, limit?: number) => {
     log.debug("IPC history:list", { limit });
     return transcriptionDatabase.list(limit);
+  });
+
+  ipcMain.handle("history:word-count-this-week", () => {
+    log.debug("IPC history:word-count-this-week");
+    return transcriptionDatabase.wordCountThisWeek();
   });
 
   ipcMain.handle("transcription:save", (_, record) => {
@@ -248,6 +254,16 @@ export function registerIpc(): void {
     return shell.openExternal(url);
   });
 
+  ipcMain.handle("app:version", () => app.getVersion());
+
+  ipcMain.handle("app:update-check", (_, force?: boolean) => {
+    return updateChecker.check(Boolean(force));
+  });
+
+  ipcMain.handle("app:update-open", () => {
+    return updateChecker.openDownload();
+  });
+
   ipcMain.handle("runtime:status", () => {
     const status = getRuntimeStatus();
     log.debug("IPC runtime:status", status);
@@ -297,6 +313,7 @@ export function registerInitialHotkey(): void {
 
 export function getRuntimeStatus(): RuntimeStatus {
   const status = {
+    appVersion: app.getVersion(),
     platform: process.platform,
     microphone: getMicrophoneStatus(),
     accessibility: getAccessibilityStatus(),
@@ -311,7 +328,7 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
   if (settings.mockTranscription) {
     log.debug("Returning mock transcription", { transcriptionMode: settings.transcriptionMode });
     await new Promise((resolve) => setTimeout(resolve, 650));
-    return "Dicta Fun captured this dictation and is ready to paste it anywhere you are working.";
+    return "This is a test transcription. Your actual speech will appear here once you start recording.";
   }
 
   if (settings.transcriptionMode === "cloud") {

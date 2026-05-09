@@ -107,23 +107,20 @@ function resolvePasteBinary(): string | null {
   const name = byPlatform[process.platform];
   if (!name) return null;
 
-  const candidates = new Set<string>([
-    path.join(app.getAppPath(), "resources", "bin", name),
-    path.join(app.getAppPath(), "resources", name),
-    path.join(__dirname, "../../../resources/bin", name),
-    path.join(__dirname, "../../../resources", name),
-  ]);
-
-  if (process.resourcesPath) {
-    [
-      path.join(process.resourcesPath, "bin", name),
-      path.join(process.resourcesPath, name),
-      path.join(process.resourcesPath, "resources", "bin", name),
-      path.join(process.resourcesPath, "resources", name),
-      path.join(process.resourcesPath, "app.asar.unpacked", "resources", "bin", name),
-      path.join(process.resourcesPath, "app.asar.unpacked", "resources", name),
-    ].forEach((candidate) => candidates.add(candidate));
-  }
+  // In packaged builds, binaries land in Resources/bin/ via extraResources.
+  // Never use app.getAppPath() here in packaged mode — it resolves to app.asar
+  // which Electron's fs shim makes look real, but spawn() cannot execute ASAR
+  // paths and throws ENOTDIR.
+  const candidates: string[] = app.isPackaged
+    ? [
+        path.join(process.resourcesPath, "bin", name),                                     // extraResources → Resources/bin/
+        path.join(process.resourcesPath, "app.asar.unpacked", "resources", "bin", name),   // asarUnpack fallback
+      ]
+    : [
+        path.join(app.getAppPath(), "resources", "bin", name),
+        path.join(__dirname, "../../../resources/bin", name),
+        path.join(__dirname, "../../../resources", name),
+      ];
 
   for (const candidate of candidates) {
     log.debug("Paste binary candidate", { platform: process.platform, candidate });

@@ -41,15 +41,25 @@ jobs:
       - name: Create runtime env file
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
+          VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
+          VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
         run: |
           set -euo pipefail
           if [[ -z "${VITE_API_URL:-}" ]]; then
             echo "Missing GitHub Actions variable: VITE_API_URL"
             exit 1
           fi
+          if [[ -z "${VITE_DESKTOP_UPDATES_URL:-}" ]]; then
+            echo "Missing GitHub Actions variable: VITE_DESKTOP_UPDATES_URL"
+            exit 1
+          fi
 
           {
             printf 'VITE_API_URL=%s\n' "$VITE_API_URL"
+            printf 'VITE_DESKTOP_UPDATES_URL=%s\n' "$VITE_DESKTOP_UPDATES_URL"
+            if [[ -n "${VITE_DESKTOP_DOWNLOAD_BASE_URL:-}" ]]; then
+              printf 'VITE_DESKTOP_DOWNLOAD_BASE_URL=%s\n' "$VITE_DESKTOP_DOWNLOAD_BASE_URL"
+            fi
             printf 'VOXLY_DEBUG=0\n'
           } > resources/runtime.env
 
@@ -141,15 +151,31 @@ jobs:
         shell: pwsh
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
+          VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
+          VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:VITE_API_URL)) {
             throw "Missing GitHub Actions variable: VITE_API_URL"
           }
+          if ([string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_UPDATES_URL)) {
+            throw "Missing GitHub Actions variable: VITE_DESKTOP_UPDATES_URL"
+          }
 
-          @(
+          $runtimeEnv = @(
             "VITE_API_URL=$env:VITE_API_URL",
+            "VITE_DESKTOP_UPDATES_URL=$env:VITE_DESKTOP_UPDATES_URL",
             "VOXLY_DEBUG=0"
-          ) | Set-Content -Path resources/runtime.env -Encoding utf8
+          )
+          if (-not [string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_DOWNLOAD_BASE_URL)) {
+            $runtimeEnv = @(
+              "VITE_API_URL=$env:VITE_API_URL",
+              "VITE_DESKTOP_UPDATES_URL=$env:VITE_DESKTOP_UPDATES_URL",
+              "VITE_DESKTOP_DOWNLOAD_BASE_URL=$env:VITE_DESKTOP_DOWNLOAD_BASE_URL",
+              "VOXLY_DEBUG=0"
+            )
+          }
+
+          $runtimeEnv | Set-Content -Path resources/runtime.env -Encoding utf8
 
       - name: Build Windows installer
         run: npm run dist:win

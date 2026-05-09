@@ -69,9 +69,30 @@ export type TranscriptionRecord = {
 };
 
 export type RuntimeStatus = {
+  appVersion: string;
   platform: NodeJS.Platform;
   microphone: "unknown" | "granted" | "denied" | "restricted" | "not-determined";
   accessibility: "unknown" | "granted" | "denied";
   whisper: "disabled" | "mock" | "starting" | "ready" | "missing" | "error";
   hotkeyRegistered: boolean;
+};
+
+export type DesktopUpdateFile = {
+  os: "mac" | "windows" | string;
+  name: string;
+  releaseKey: string;
+  latestKey: string;
+  aliasKey?: string;
+};
+
+export type DesktopUpdateStatus = {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  checkedAt: string | null;
+  source: "default" | "remote";
+  downloadUrl?: string;
+  releaseUrl?: string;
+  fileName?: string;
+  reason?: string;
 };

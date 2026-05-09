@@ -93,6 +93,29 @@ export class TranscriptionDatabase {
     return rows;
   }
 
+  async wordCountThisWeek(): Promise<{ wordsUsed: number; wordsLimit: number }> {
+    const WEEKLY_LIMIT = 10_000;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    if (this.db) {
+      const row = this.db.prepare(`
+        SELECT COALESCE(SUM(
+          LENGTH(TRIM(original_text)) - LENGTH(REPLACE(TRIM(original_text), ' ', '')) +
+          CASE WHEN LENGTH(TRIM(original_text)) > 0 THEN 1 ELSE 0 END
+        ), 0) AS wordCount
+        FROM transcriptions
+        WHERE datetime(timestamp) >= datetime(?)
+      `).get(sevenDaysAgo) as { wordCount: number };
+      return { wordsUsed: row.wordCount, wordsLimit: WEEKLY_LIMIT };
+    }
+
+    const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const wordsUsed = this.rows
+      .filter((r) => Date.parse(r.timestamp) >= sevenDaysAgoMs)
+      .reduce((sum, r) => sum + r.originalText.trim().split(/\s+/).filter(Boolean).length, 0);
+    return { wordsUsed, wordsLimit: WEEKLY_LIMIT };
+  }
+
   async save(record: NewRecord): Promise<TranscriptionRecord> {
     log.debug("Saving transcription record", {
       backend: this.db ? "sqlite" : "json",

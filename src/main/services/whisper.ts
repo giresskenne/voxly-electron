@@ -100,7 +100,7 @@ export class WhisperService {
     if (settings.mockTranscription || this.status !== "ready") {
       log.debug("Returning mock transcription", { status: this.status });
       await new Promise((resolve) => setTimeout(resolve, 650));
-      return "Dicta Fun captured this dictation and is ready to paste it anywhere you are working.";
+      return "This is a test transcription. Your actual speech will appear here once you start recording.";
     }
 
     const dir = path.join(os.tmpdir(), "voxly");
@@ -150,6 +150,9 @@ export class WhisperService {
 
   private resolveBinary(): string | null {
     const name = process.platform === "win32" ? "whisper-server.exe" : "whisper-server";
+    // In packaged builds, binaries land in Resources/bin/ via extraResources.
+    // Never reference app.getAppPath() in packaged mode — it points into app.asar
+    // which spawn() cannot execute (ENOTDIR).
     const candidate = app.isPackaged
       ? path.join(process.resourcesPath, "bin", name)
       : path.join(app.getAppPath(), "resources", "bin", name);
