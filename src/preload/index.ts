@@ -4,6 +4,7 @@ import type {
   AudioChunk,
   BillingInterval,
   CheckoutSession,
+  DesktopUpdateStatus,
   EntitlementStatus,
   PaidPlan,
   RuntimeStatus,
@@ -23,6 +24,7 @@ const api = {
   getSettings: () => invoke<AppSettings>("settings:get"),
   updateSettings: (patch: Partial<AppSettings>) => invoke<AppSettings>("settings:update", patch),
   listHistory: (limit?: number) => invoke<TranscriptionRecord[]>("history:list", limit),
+  getWordCountThisWeek: () => invoke<{ wordsUsed: number; wordsLimit: number }>("history:word-count-this-week"),
   transcribeLocalWhisper: (buffer: ArrayBuffer, options?: Partial<AppSettings>, chunks?: AudioChunk[]) =>
     invoke<TranscribeResult>("transcribe:local-whisper", buffer, options, chunks),
   pasteText: (text: string) =>
@@ -36,6 +38,9 @@ const api = {
   openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms") =>
     invoke<void>("app:open-web-route", route),
   openURL: (url: string) => invoke<void>("app:open-url", url),
+  getAppVersion: () => invoke<string>("app:version"),
+  checkForUpdates: (force?: boolean) => invoke<DesktopUpdateStatus>("app:update-check", force),
+  openUpdateDownload: () => invoke<void>("app:update-open"),
   setSessionToken: (token: string) => invoke<EntitlementStatus>("auth:set-session-token", token),
   clearSessionToken: () => invoke<EntitlementStatus>("auth:clear-session-token"),
   getEntitlementStatus: (force?: boolean) => invoke<EntitlementStatus>("entitlement:get", force),

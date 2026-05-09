@@ -47,11 +47,13 @@
     "productName": "Dicta Fun",
     "files": [
       "out/**/*",
-      "resources/**/*"
+      "resources/**/*",
+      "!resources/bin/**",
+      "!resources/models/**"
     ],
-    "asarUnpack": [
-      "resources/bin/**",
-      "resources/models/**"
+    "extraResources": [
+      { "from": "resources/bin", "to": "bin" },
+      { "from": "resources/models", "to": "models" }
     ],
     "mac": {
       "icon": "resources/icon.icns",

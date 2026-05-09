@@ -10,6 +10,8 @@ Three tiers with monthly and yearly billing:
 - **Starter**: Monthly or yearly subscription, additional features
 - **Pro**: Monthly or yearly subscription, premium features
 
+Core free features include local transcription and AI cleanup. Paid plan status gates premium capabilities such as cloud transcription.
+
 Price IDs are configured in backend via `PADDLE_PRICE_*` env vars. See [DEPLOYMENT.md](DEPLOYMENT.md) for production/sandbox price ID setup.
 
 ## Billing Status

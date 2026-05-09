@@ -51,9 +51,10 @@ class DragManager {
 
 function enforceAlwaysOnTop(win: BrowserWindow): void {
   if (process.platform === "darwin") {
-    // Match the reference app: a panel at floating level stays visible across
-    // spaces/full-screen apps without becoming a normal app window.
-    win.setAlwaysOnTop(true, "floating", 1);
+    // "screen-saver" (NSScreenSaverWindowLevel = 2000) ensures the overlay
+    // stays above fullscreen apps, video players, and other floating windows.
+    // visibleOnFullScreen keeps it on screen when another app goes fullscreen.
+    win.setAlwaysOnTop(true, "screen-saver");
     win.setVisibleOnAllWorkspaces(true, {
       visibleOnFullScreen: true,
       skipTransformProcessType: true,

@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Circle,
   CreditCard,
+  Download,
   Globe,
   HelpCircle,
   Home,
@@ -35,6 +36,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AppSettings,
   BillingInterval,
+  DesktopUpdateStatus,
   EntitlementStatus,
   PaidPlan,
   RuntimeStatus,
@@ -54,7 +56,7 @@ const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   billingPlan: "free",
   billingStatus: "unknown",
   canUseCloudTranscription: false,
-  canUseCleanup: false,
+  canUseCleanup: true,
   checkedAt: new Date(0).toISOString(),
   source: "default",
   reason: "not-checked",
@@ -65,6 +67,18 @@ function formatPlanLabel(plan: EntitlementStatus["billingPlan"]): string {
   if (plan === "starter") return "Starter plan";
   return "Free plan";
 }
+
+function formatUpdateStatus(status: DesktopUpdateStatus | null, currentVersion: string): string {
+  if (!status) return `Current version: ${currentVersion}.`;
+  if (status.updateAvailable && status.latestVersion) {
+    return `Version ${status.latestVersion} is available.`;
+  }
+  if (status.latestVersion) {
+    return `You are up to date on version ${currentVersion}.`;
+  }
+  return "Update checks are not configured for this build.";
+}
+
 const hotkeyModeOptions: Array<{
   value: AppSettings["mode"];
   label: string;
@@ -90,6 +104,9 @@ export function SettingsApp() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [entitlement, setEntitlement] = useState<EntitlementStatus>(DEFAULT_ENTITLEMENT);
   const [history, setHistory] = useState<TranscriptionRecord[]>([]);
+  const [weeklyUsage, setWeeklyUsage] = useState<{ wordsUsed: number; wordsLimit: number } | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
   const [activeSection, setActiveSection] = useState("home");
 
   useEffect(() => {
@@ -145,10 +162,12 @@ export function SettingsApp() {
 
   async function refresh() {
     log.debug("Refreshing settings screen data");
-    const [synced, nextRuntime, nextHistory] = await Promise.all([
+    const [synced, nextRuntime, nextHistory, nextUsage, nextUpdateStatus] = await Promise.all([
       window.electronAPI.syncEntitlement(),
       window.electronAPI.getRuntimeStatus(),
       window.electronAPI.listHistory(20),
+      window.electronAPI.getWordCountThisWeek(),
+      window.electronAPI.checkForUpdates(),
     ]);
     log.info("Settings screen data refreshed", {
       runtime: nextRuntime,
@@ -156,11 +175,14 @@ export function SettingsApp() {
       onboardingComplete: synced.settings.onboardingComplete,
       billingPlan: synced.entitlements.billingPlan,
       billingStatus: synced.entitlements.billingStatus,
+      updateAvailable: nextUpdateStatus.updateAvailable,
     });
     setSettings(synced.settings);
     setRuntime(nextRuntime);
     setHistory(nextHistory);
     setEntitlement(synced.entitlements);
+    setWeeklyUsage(nextUsage);
+    setUpdateStatus(nextUpdateStatus);
   }
 
   async function patchSettings(patch: Partial<AppSettings>) {
@@ -208,6 +230,19 @@ export function SettingsApp() {
     const session = await window.electronAPI.startCheckout({ plan, interval });
     await syncEntitlement(true);
     return session;
+  }
+
+  async function checkForUpdates(force = true) {
+    setUpdateBusy(true);
+    try {
+      setUpdateStatus(await window.electronAPI.checkForUpdates(force));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  async function openUpdateDownload() {
+    await window.electronAPI.openUpdateDownload();
   }
 
 
@@ -267,12 +302,21 @@ export function SettingsApp() {
           </div>
           <div className="voxly-upgrade-card__usage">
             <div className="voxly-upgrade-card__bar">
-              <div className="voxly-upgrade-card__bar-fill" style={{ width: "40%" }} />
+              <div
+                className="voxly-upgrade-card__bar-fill"
+                style={{
+                  width: weeklyUsage
+                    ? `${Math.min(100, (weeklyUsage.wordsUsed / weeklyUsage.wordsLimit) * 100)}%`
+                    : "0%",
+                }}
+              />
             </div>
             <p>
-              {entitlement.isAuthenticated
-                ? `Status: ${entitlement.billingStatus.replace("_", " ")}`
-                : "Sign in to unlock paid features"}
+              {weeklyUsage && weeklyUsage.wordsUsed > 0
+                ? `${weeklyUsage.wordsUsed.toLocaleString()} / ${weeklyUsage.wordsLimit.toLocaleString()} words this week`
+                : entitlement.isAuthenticated
+                  ? `Status: ${entitlement.billingStatus.replace("_", " ")}`
+                  : "Sign in to unlock paid features"}
             </p>
           </div>
           <button
@@ -334,11 +378,18 @@ export function SettingsApp() {
           <div className="voxly-profile__info">
             <span className="voxly-profile__name">{settings.agentName || "Your account"}</span>
             <span className="voxly-profile__plan">{formatPlanLabel(entitlement.billingPlan)}</span>
+            <span className="voxly-profile__version">Version {runtime.appVersion}</span>
           </div>
         </button>
       </aside>
 
       <section className="voxly-main">
+        <UpdateBanner
+          status={updateStatus}
+          busy={updateBusy}
+          onCheck={() => void checkForUpdates(true)}
+          onDownload={() => void openUpdateDownload()}
+        />
         {activeSection === "home" && (
           <HomePage history={history} settings={settings} />
         )}
@@ -353,15 +404,57 @@ export function SettingsApp() {
             settings={settings}
             runtime={runtime}
             entitlement={entitlement}
+            updateStatus={updateStatus}
+            updateBusy={updateBusy}
             onPatchSettings={patchSettings}
             onSaveSessionToken={saveSessionToken}
             onClearSession={clearSession}
             onStartCheckout={startCheckout}
             onRefreshEntitlement={() => syncEntitlement(true)}
+            onCheckUpdates={() => checkForUpdates(true)}
+            onOpenUpdate={openUpdateDownload}
           />
         )}
       </section>
     </main>
+  );
+}
+
+function UpdateBanner({
+  status,
+  busy,
+  onCheck,
+  onDownload,
+}: {
+  status: DesktopUpdateStatus | null;
+  busy: boolean;
+  onCheck: () => void;
+  onDownload: () => void;
+}) {
+  if (!status?.updateAvailable) return null;
+
+  return (
+    <div className="app-update-banner glass-panel-subtle" role="status">
+      <div className="app-update-banner__icon">
+        <Download size={18} />
+      </div>
+      <div className="app-update-banner__copy">
+        <strong>Dicta Fun {status.latestVersion} is ready</strong>
+        <p>You are running {status.currentVersion}.</p>
+      </div>
+      <div className="app-update-banner__actions">
+        <TextButton variant="quiet" disabled={busy} onClick={onCheck}>
+          <RefreshCw size={15} />
+          {busy ? "Checking..." : "Check"}
+        </TextButton>
+        {status.downloadUrl && (
+          <TextButton variant="primary" onClick={onDownload}>
+            <Download size={15} />
+            Download Update
+          </TextButton>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -654,20 +747,28 @@ function SettingsPage({
   settings,
   runtime,
   entitlement,
+  updateStatus,
+  updateBusy,
   onPatchSettings,
   onSaveSessionToken,
   onClearSession,
   onStartCheckout,
   onRefreshEntitlement,
+  onCheckUpdates,
+  onOpenUpdate,
 }: {
   settings: AppSettings;
   runtime: RuntimeStatus;
   entitlement: EntitlementStatus;
+  updateStatus: DesktopUpdateStatus | null;
+  updateBusy: boolean;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
   onSaveSessionToken: (token: string) => Promise<void>;
   onClearSession: () => Promise<void>;
   onStartCheckout: (plan: PaidPlan, interval: BillingInterval) => Promise<unknown>;
   onRefreshEntitlement: () => Promise<void>;
+  onCheckUpdates: () => Promise<void>;
+  onOpenUpdate: () => Promise<void>;
 }) {
   const [sessionToken, setSessionToken] = useState("");
   const [selectedPlan, setSelectedPlan] = useState<PaidPlan>("starter");
@@ -765,6 +866,26 @@ function SettingsPage({
           </div>
         </div>
 
+        <div className="settings-row">
+          <div>
+            <h3>App version</h3>
+            <p>{formatUpdateStatus(updateStatus, runtime.appVersion)}</p>
+          </div>
+          <div className="settings-row__actions">
+            <span className="settings-version-pill">v{runtime.appVersion}</span>
+            <TextButton disabled={updateBusy} onClick={() => void onCheckUpdates()}>
+              <RefreshCw size={16} />
+              {updateBusy ? "Checking..." : "Check Updates"}
+            </TextButton>
+            {updateStatus?.updateAvailable && updateStatus.downloadUrl && (
+              <TextButton variant="primary" onClick={() => void onOpenUpdate()}>
+                <Download size={16} />
+                Download Update
+              </TextButton>
+            )}
+          </div>
+        </div>
+
         <div className="settings-row settings-row--stacked">
           <div>
             <h3>Hotkey mode</h3>
@@ -797,10 +918,7 @@ function SettingsPage({
         <div className="settings-row">
           <div>
             <h3>Text cleanup</h3>
-            <p>
-              Automatically polish punctuation and casing after you dictate.
-              {!entitlement.canUseCleanup ? " Upgrade to an active paid plan to enable this feature." : ""}
-            </p>
+            <p>Automatically polish punctuation and casing after you dictate.</p>
           </div>
           <label className="settings-toggle" aria-label="Toggle text cleanup">
             <input
@@ -908,7 +1026,7 @@ const onboardingSteps: Array<{
     eyebrow: "Setup",
     title: "Make dictation feel native.",
     summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
-    icon: Sparkles,
+    icon: MousePointerClick,
   },
   {
     id: "permissions",
@@ -916,6 +1034,13 @@ const onboardingSteps: Array<{
     title: "Grant only what dictation needs.",
     summary: "Microphone access captures speech. On macOS, Accessibility lets Dicta Fun paste the result back at the cursor.",
     icon: LockKeyhole,
+  },
+  {
+    id: "hotkey",
+    eyebrow: "Shortcut",
+    title: "Learn your shortcut.",
+    summary: "Try both modes — tap once to start and again to stop, or hold while speaking. Then choose the one that fits you best.",
+    icon: Zap,
   },
   {
     id: "test",
@@ -929,7 +1054,7 @@ const onboardingSteps: Array<{
     eyebrow: "Ready",
     title: "Try it from anywhere.",
     summary: "Open the overlay, press your shortcut, speak, and Dicta Fun will paste the transcript where your cursor is focused.",
-    icon: MousePointerClick,
+    icon: Check,
   },
 ];
 
@@ -1011,6 +1136,9 @@ function OnboardingFlow({
             {step.id === "permissions" && (
               <PermissionsStep runtime={runtime} micCheck={micCheck} onCheckMicrophone={checkMicrophone} onRefresh={onRefresh} />
             )}
+            {step.id === "hotkey" && (
+              <HotkeyTeachStep settings={settings} onPatchSettings={onPatchSettings} />
+            )}
             {step.id === "test" && <DictationTestStep settings={settings} />}
             {step.id === "finish" && <FinishStep settings={settings} runtime={runtime} />}
           </div>
@@ -1054,8 +1182,8 @@ function WelcomeStep({ settings, runtime }: { settings: AppSettings; runtime: Ru
   return (
     <div className="onboarding-preview">
       <div className="shortcut-preview">
-        <span>Shortcut</span>
-        <strong>{settings.hotkey}</strong>
+        <span className="shortcut-preview__label">Shortcut</span>
+        <HotkeyChip hotkey={settings.hotkey} />
       </div>
       <div className="mini-overlay">
         <span className="status-dot" data-state={runtime.whisper === "ready" ? "complete" : "processing"} />
@@ -1122,6 +1250,111 @@ function PermissionsStep({
         <RefreshCw size={17} />
         Refresh Status
       </TextButton>
+    </div>
+  );
+}
+
+function HotkeyTeachStep({
+  settings,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  const [tapDone, setTapDone] = useState(false);
+  const [holdDone, setHoldDone] = useState(false);
+  const [tapState, setTapState] = useState<"idle" | "recording">("idle");
+  const [holdState, setHoldState] = useState<"idle" | "recording">("idle");
+
+  function handleTapClick() {
+    if (tapState === "idle") {
+      setTapState("recording");
+    } else {
+      setTapState("idle");
+      setTapDone(true);
+    }
+  }
+
+  function handleHoldMouseDown() {
+    setHoldState("recording");
+  }
+
+  function handleHoldMouseUp() {
+    setHoldState("idle");
+    setHoldDone(true);
+  }
+
+  const bothDone = tapDone && holdDone;
+
+  return (
+    <div className="hotkey-teach">
+      {/* Tap-to-talk trial */}
+      <div className={cn("hotkey-teach__trial", tapDone && "hotkey-teach__trial--done")}>
+        <div className="hotkey-teach__trial-label">
+          <MousePointerClick size={16} />
+          <span><strong>Tap to talk</strong> — press once to start, press again to stop</span>
+          {tapDone && <CheckCircle2 size={16} className="hotkey-teach__check" />}
+        </div>
+        <button
+          type="button"
+          className={cn("hotkey-teach__demo-btn", tapState === "recording" && "hotkey-teach__demo-btn--active")}
+          onClick={handleTapClick}
+          disabled={tapDone}
+        >
+          {tapState === "idle"
+            ? tapDone ? "Done ✓" : "Press to start"
+            : "Press again to stop"}
+        </button>
+      </div>
+
+      {/* Push-to-talk trial */}
+      <div className={cn("hotkey-teach__trial", holdDone && "hotkey-teach__trial--done")}>
+        <div className="hotkey-teach__trial-label">
+          <Mic size={16} />
+          <span><strong>Push to talk</strong> — hold while speaking, release to stop</span>
+          {holdDone && <CheckCircle2 size={16} className="hotkey-teach__check" />}
+        </div>
+        <button
+          type="button"
+          className={cn("hotkey-teach__demo-btn", holdState === "recording" && "hotkey-teach__demo-btn--active")}
+          onMouseDown={handleHoldMouseDown}
+          onMouseUp={handleHoldMouseUp}
+          onMouseLeave={holdState === "recording" ? handleHoldMouseUp : undefined}
+          disabled={holdDone}
+        >
+          {holdDone ? "Done ✓" : "Hold to talk"}
+        </button>
+      </div>
+
+      {/* Mode picker — shown once both are tried */}
+      {bothDone && (
+        <div className="hotkey-teach__pick">
+          <p className="hotkey-teach__pick-label">Which felt better?</p>
+          <div className="settings-mode-options" role="radiogroup" aria-label="Preferred hotkey mode">
+            {hotkeyModeOptions.map((option) => {
+              const Icon = option.icon;
+              return (
+                <label
+                  key={option.value}
+                  className={cn("settings-mode-option", settings.mode === option.value && "settings-mode-option--active")}
+                >
+                  <input
+                    type="radio"
+                    name="hotkey-mode-onboarding"
+                    value={option.value}
+                    checked={settings.mode === option.value}
+                    onChange={() => void onPatchSettings({ mode: option.value })}
+                  />
+                  <Icon size={17} />
+                  <span>{option.label}</span>
+                  <small>{option.description}</small>
+                </label>
+              );
+            })}
+          </div>
+          <p className="hotkey-teach__hint">You can change this anytime in Settings.</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -1292,6 +1525,18 @@ function PreferencesStep({
   );
 }
 
+function whisperStatusLabel(status: RuntimeStatus["whisper"]): string {
+  switch (status) {
+    case "ready": return "Ready";
+    case "starting": return "Starting up…";
+    case "mock": return "Demo mode";
+    case "missing": return "Model not downloaded — dictation will use cloud";
+    case "error": return "Error loading model";
+    case "disabled": return "Disabled";
+    default: return String(status);
+  }
+}
+
 function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: RuntimeStatus }) {
   return (
     <div className="finish-card">
@@ -1301,15 +1546,15 @@ function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: Run
       <dl>
         <div>
           <dt>Shortcut</dt>
-          <dd>{settings.hotkey}</dd>
+          <dd><HotkeyChip hotkey={settings.hotkey} /></dd>
         </div>
         <div>
           <dt>Mode</dt>
           <dd>{settings.mode === "tap-to-talk" ? "Tap to talk" : "Push to talk"}</dd>
         </div>
         <div>
-          <dt>Whisper</dt>
-          <dd>{runtime.whisper}</dd>
+          <dt>AI Model</dt>
+          <dd>{whisperStatusLabel(runtime.whisper)}</dd>
         </div>
       </dl>
       <TextButton onClick={() => window.electronAPI.openPanel()}>
