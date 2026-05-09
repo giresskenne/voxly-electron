@@ -29,7 +29,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { AppSettings, RuntimeStatus, TranscriptionRecord } from "../../main/types";
+import type {
+  AppSettings,
+  EntitlementStatus,
+  RuntimeStatus,
+  TranscriptionRecord,
+} from "../../main/types";
 import { BrandMark } from "../components/BrandMark";
 import { TextButton } from "../components/Controls";
 import { modelOptions } from "../design/source";
@@ -37,6 +42,23 @@ import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 
 const log = createRendererLogger("settings-ui");
+
+const DEFAULT_ENTITLEMENT: EntitlementStatus = {
+  isAuthenticated: false,
+  billingPlan: "free",
+  billingStatus: "unknown",
+  canUseCloudTranscription: false,
+  canUseCleanup: false,
+  checkedAt: new Date(0).toISOString(),
+  source: "default",
+  reason: "not-checked",
+};
+
+function formatPlanLabel(plan: EntitlementStatus["billingPlan"]): string {
+  if (plan === "pro") return "Pro plan";
+  if (plan === "starter") return "Starter plan";
+  return "Free plan";
+}
 const hotkeyModeOptions: Array<{
   value: AppSettings["mode"];
   label: string;
@@ -60,6 +82,7 @@ const hotkeyModeOptions: Array<{
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [entitlement, setEntitlement] = useState<EntitlementStatus>(DEFAULT_ENTITLEMENT);
   const [history, setHistory] = useState<TranscriptionRecord[]>([]);
   const [activeSection, setActiveSection] = useState("home");
 
@@ -70,28 +93,37 @@ export function SettingsApp() {
     const offSaved = window.electronAPI.onTranscriptionSaved(() => {
       window.electronAPI.listHistory(20).then(setHistory);
     });
+    const offDeepLink = window.electronAPI.onDeepLink((url) => {
+      log.info("Received deep link", { url });
+      void handleDeepLink(url);
+    });
     return () => {
       log.info("Settings app unmounted");
       offRuntime();
       offSaved();
+      offDeepLink();
     };
   }, []);
 
   async function refresh() {
     log.debug("Refreshing settings screen data");
-    const [nextSettings, nextRuntime, nextHistory] = await Promise.all([
+    const [nextSettings, nextRuntime, nextHistory, nextEntitlement] = await Promise.all([
       window.electronAPI.getSettings(),
       window.electronAPI.getRuntimeStatus(),
       window.electronAPI.listHistory(20),
+      window.electronAPI.getEntitlementStatus(),
     ]);
     log.info("Settings screen data refreshed", {
       runtime: nextRuntime,
       historyCount: nextHistory.length,
       onboardingComplete: nextSettings.onboardingComplete,
+      billingPlan: nextEntitlement.billingPlan,
+      billingStatus: nextEntitlement.billingStatus,
     });
     setSettings(nextSettings);
     setRuntime(nextRuntime);
     setHistory(nextHistory);
+    setEntitlement(nextEntitlement);
   }
 
   async function patchSettings(patch: Partial<AppSettings>) {
@@ -100,6 +132,29 @@ export function SettingsApp() {
     setSettings(next);
     setRuntime(await window.electronAPI.getRuntimeStatus());
     log.info("Settings patch applied", patch);
+  }
+
+  async function handleDeepLink(url: string) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      log.warn("Invalid deep link", { url });
+      return;
+    }
+
+    const isAuthCallback = parsed.protocol === "dictafun:" && parsed.hostname === "auth";
+    if (!isAuthCallback) return;
+
+    const token = parsed.searchParams.get("token") ?? "";
+    if (!token.trim()) {
+      log.warn("Auth callback missing token");
+      return;
+    }
+
+    log.info("Applying auth callback token");
+    const nextEntitlement = await window.electronAPI.setSessionToken(token);
+    setEntitlement(nextEntitlement);
   }
 
 
@@ -155,13 +210,17 @@ export function SettingsApp() {
         {/* Upgrade card */}
         <div className="voxly-upgrade-card">
           <div className="voxly-upgrade-card__header">
-            <span>Free plan</span>
+            <span>{formatPlanLabel(entitlement.billingPlan)}</span>
           </div>
           <div className="voxly-upgrade-card__usage">
             <div className="voxly-upgrade-card__bar">
               <div className="voxly-upgrade-card__bar-fill" style={{ width: "40%" }} />
             </div>
-            <p>400 / 1,000 words remaining</p>
+            <p>
+              {entitlement.isAuthenticated
+                ? `Status: ${entitlement.billingStatus.replace("_", " ")}`
+                : "Sign in to unlock paid features"}
+            </p>
           </div>
           <button
             type="button"
@@ -169,7 +228,7 @@ export function SettingsApp() {
             onClick={() => window.electronAPI.openWebRoute("pricing")}
           >
             <Star size={14} />
-            Upgrade to Pro
+            {entitlement.billingPlan === "pro" ? "Manage plan" : "Upgrade to Pro"}
           </button>
         </div>
 
@@ -221,7 +280,7 @@ export function SettingsApp() {
           </div>
           <div className="voxly-profile__info">
             <span className="voxly-profile__name">{settings.agentName || "Your account"}</span>
-            <span className="voxly-profile__plan">Free plan</span>
+            <span className="voxly-profile__plan">{formatPlanLabel(entitlement.billingPlan)}</span>
           </div>
         </button>
       </aside>

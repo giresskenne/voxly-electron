@@ -7,6 +7,7 @@ import { transcriptionDatabase } from "./services/database";
 import { whisperService } from "./services/whisper";
 import { unregisterHotkeys } from "./services/hotkeys";
 import { globeKeyManager } from "./services/globe-key-manager";
+import { entitlementService } from "./services/entitlements";
 import { windows } from "./window-manager";
 import { createMainLogger, ensureFileLogging } from "./debug-log";
 
@@ -109,6 +110,17 @@ app.whenReady().then(async () => {
 
   log.debug("Loading settings");
   await settingsStore.load();
+  const startupEntitlement = await entitlementService.refresh();
+  const gatedStartupSettings = entitlementService.gateSettings(settingsStore.get(), startupEntitlement);
+  if (
+    gatedStartupSettings.transcriptionMode !== settingsStore.get().transcriptionMode ||
+    gatedStartupSettings.cleanupEnabled !== settingsStore.get().cleanupEnabled
+  ) {
+    await settingsStore.save({
+      transcriptionMode: gatedStartupSettings.transcriptionMode,
+      cleanupEnabled: gatedStartupSettings.cleanupEnabled,
+    });
+  }
   log.debug("Initializing transcription database");
   await transcriptionDatabase.init();
   log.debug("Registering IPC handlers");

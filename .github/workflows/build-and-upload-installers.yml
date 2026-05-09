@@ -30,47 +30,61 @@ jobs:
         run: npm ci
 
       - name: Prepare Apple Signing Certificate
-        if: ${{ secrets.CSC_LINK != null && secrets.CSC_KEY_PASSWORD != null }}
+        env:
+          CERTIFICATE_LINK: ${{ secrets.CSC_LINK }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          if [[ -z "${CERTIFICATE_LINK:-}" || -z "${CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "Skipping Apple signing certificate; CSC_LINK and CSC_KEY_PASSWORD are not both configured"
+            exit 0
+          fi
+
           mkdir -p "$HOME/certs"
-          echo "${{ secrets.CSC_LINK }}" | base64 --decode > "$HOME/certs/certs.p12"
+          if ! printf '%s' "$CERTIFICATE_LINK" | base64 --decode > "$HOME/certs/certs.p12" 2>/dev/null; then
+            printf '%s' "$CERTIFICATE_LINK" | base64 -D > "$HOME/certs/certs.p12"
+          fi
           echo "CSC_LINK=$HOME/certs/certs.p12" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=${{ secrets.CSC_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-          echo "✓ Apple signing certificate loaded"
+          echo "CSC_KEY_PASSWORD=$CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          echo "Apple signing certificate loaded"
 
       - name: Prepare Apple Notarization API Key
-        if: ${{ secrets.APPLE_API_KEY != null && secrets.APPLE_API_KEY_ID != null && secrets.APPLE_API_ISSUER != null }}
+        env:
+          APPLE_API_KEY_B64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID_VALUE: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_VALUE: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -euo pipefail
+          if [[ -z "${APPLE_API_KEY_B64:-}" || -z "${APPLE_API_KEY_ID_VALUE:-}" || -z "${APPLE_API_ISSUER_VALUE:-}" ]]; then
+            echo "Skipping Apple notarization API key; APPLE_API_KEY, APPLE_API_KEY_ID, and APPLE_API_ISSUER are not all configured"
+            exit 0
+          fi
+
           mkdir -p "$HOME/keys"
-          echo "${{ secrets.APPLE_API_KEY }}" | base64 --decode > "$HOME/keys/AuthKey.p8"
+          if ! printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$HOME/keys/AuthKey.p8" 2>/dev/null; then
+            printf '%s' "$APPLE_API_KEY_B64" | base64 -D > "$HOME/keys/AuthKey.p8"
+          fi
           echo "APPLE_API_KEY_PATH=$HOME/keys/AuthKey.p8" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_ID=${{ secrets.APPLE_API_KEY_ID }}" >> "$GITHUB_ENV"
-          echo "APPLE_API_ISSUER=${{ secrets.APPLE_API_ISSUER }}" >> "$GITHUB_ENV"
-          echo "✓ Apple notarization API key loaded"
+          echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID_VALUE" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_VALUE" >> "$GITHUB_ENV"
+          echo "Apple notarization API key loaded"
 
       - name: Build macOS installer
-        env:
-          CSC_LINK: ${{ env.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ env.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-          APPLE_API_KEY_ID: ${{ env.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ env.APPLE_API_ISSUER }}
         run: npm run dist:mac
 
       - name: Collect DMG
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          mapfile -t dmg_files < <(find dist release -type f -name "*.dmg" 2>/dev/null || true)
-          if [[ ${#dmg_files[@]} -eq 0 ]]; then
+          dmg_found=false
+          while IFS= read -r f; do
+            cp "$f" release-assets/
+            dmg_found=true
+          done < <(find dist release -type f -name "*.dmg" 2>/dev/null || true)
+          if [[ "$dmg_found" != true ]]; then
             echo "No .dmg file found under dist/ or release/"
             exit 1
           fi
-          for f in "${dmg_files[@]}"; do
-            cp "$f" release-assets/
-          done
           ls -la release-assets
 
       - name: Upload macOS artifact
