@@ -8,10 +8,13 @@ import {
   CheckCircle2,
   ChevronRight,
   Circle,
+  CreditCard,
   Globe,
   HelpCircle,
   Home,
   LockKeyhole,
+  LogIn,
+  LogOut,
   Mic,
   MousePointerClick,
   Plus,
@@ -31,7 +34,9 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AppSettings,
+  BillingInterval,
   EntitlementStatus,
+  PaidPlan,
   RuntimeStatus,
   TranscriptionRecord,
 } from "../../main/types";
@@ -42,6 +47,7 @@ import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 
 const log = createRendererLogger("settings-ui");
+const ENTITLEMENT_REFRESH_MS = 60_000;
 
 const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   isAuthenticated: false,
@@ -93,6 +99,9 @@ export function SettingsApp() {
     const offSaved = window.electronAPI.onTranscriptionSaved(() => {
       window.electronAPI.listHistory(20).then(setHistory);
     });
+    const offSettings = window.electronAPI.onSettingsUpdated((nextSettings) => {
+      setSettings(nextSettings);
+    });
     const offDeepLink = window.electronAPI.onDeepLink((url) => {
       log.info("Received deep link", { url });
       void handleDeepLink(url);
@@ -101,29 +110,57 @@ export function SettingsApp() {
       log.info("Settings app unmounted");
       offRuntime();
       offSaved();
+      offSettings();
       offDeepLink();
     };
   }, []);
 
+  useEffect(() => {
+    const syncOnResume = () => {
+      void syncEntitlement(true);
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        void syncEntitlement(true);
+      }
+    };
+    window.addEventListener("focus", syncOnResume);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(() => {
+      void syncEntitlement(true);
+    }, ENTITLEMENT_REFRESH_MS);
+
+    return () => {
+      window.removeEventListener("focus", syncOnResume);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  async function syncEntitlement(force = false) {
+    const synced = await window.electronAPI.syncEntitlement(force);
+    setEntitlement(synced.entitlements);
+    setSettings(synced.settings);
+  }
+
   async function refresh() {
     log.debug("Refreshing settings screen data");
-    const [nextSettings, nextRuntime, nextHistory, nextEntitlement] = await Promise.all([
-      window.electronAPI.getSettings(),
+    const [synced, nextRuntime, nextHistory] = await Promise.all([
+      window.electronAPI.syncEntitlement(),
       window.electronAPI.getRuntimeStatus(),
       window.electronAPI.listHistory(20),
-      window.electronAPI.getEntitlementStatus(),
     ]);
     log.info("Settings screen data refreshed", {
       runtime: nextRuntime,
       historyCount: nextHistory.length,
-      onboardingComplete: nextSettings.onboardingComplete,
-      billingPlan: nextEntitlement.billingPlan,
-      billingStatus: nextEntitlement.billingStatus,
+      onboardingComplete: synced.settings.onboardingComplete,
+      billingPlan: synced.entitlements.billingPlan,
+      billingStatus: synced.entitlements.billingStatus,
     });
-    setSettings(nextSettings);
+    setSettings(synced.settings);
     setRuntime(nextRuntime);
     setHistory(nextHistory);
-    setEntitlement(nextEntitlement);
+    setEntitlement(synced.entitlements);
   }
 
   async function patchSettings(patch: Partial<AppSettings>) {
@@ -153,8 +190,24 @@ export function SettingsApp() {
     }
 
     log.info("Applying auth callback token");
-    const nextEntitlement = await window.electronAPI.setSessionToken(token);
-    setEntitlement(nextEntitlement);
+    await window.electronAPI.setSessionToken(token);
+    await syncEntitlement(true);
+  }
+
+  async function saveSessionToken(token: string) {
+    await window.electronAPI.setSessionToken(token);
+    await syncEntitlement(true);
+  }
+
+  async function clearSession() {
+    await window.electronAPI.clearSessionToken();
+    await syncEntitlement(true);
+  }
+
+  async function startCheckout(plan: PaidPlan, interval: BillingInterval) {
+    const session = await window.electronAPI.startCheckout({ plan, interval });
+    await syncEntitlement(true);
+    return session;
   }
 
 
@@ -296,7 +349,16 @@ export function SettingsApp() {
           <DictionaryPage settings={settings} onPatchSettings={patchSettings} />
         )}
         {activeSection === "settings" && (
-          <SettingsPage settings={settings} runtime={runtime} onPatchSettings={patchSettings} />
+          <SettingsPage
+            settings={settings}
+            runtime={runtime}
+            entitlement={entitlement}
+            onPatchSettings={patchSettings}
+            onSaveSessionToken={saveSessionToken}
+            onClearSession={clearSession}
+            onStartCheckout={startCheckout}
+            onRefreshEntitlement={() => syncEntitlement(true)}
+          />
         )}
       </section>
     </main>
@@ -591,12 +653,87 @@ function DictionaryPage({
 function SettingsPage({
   settings,
   runtime,
+  entitlement,
   onPatchSettings,
+  onSaveSessionToken,
+  onClearSession,
+  onStartCheckout,
+  onRefreshEntitlement,
 }: {
   settings: AppSettings;
   runtime: RuntimeStatus;
+  entitlement: EntitlementStatus;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  onSaveSessionToken: (token: string) => Promise<void>;
+  onClearSession: () => Promise<void>;
+  onStartCheckout: (plan: PaidPlan, interval: BillingInterval) => Promise<unknown>;
+  onRefreshEntitlement: () => Promise<void>;
 }) {
+  const [sessionToken, setSessionToken] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState<PaidPlan>("starter");
+  const [selectedInterval, setSelectedInterval] = useState<BillingInterval>("monthly");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [accountMessage, setAccountMessage] = useState("");
+
+  async function handleSaveSessionToken() {
+    if (!sessionToken.trim()) {
+      setAccountMessage("Paste an access token first.");
+      return;
+    }
+
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onSaveSessionToken(sessionToken);
+      setSessionToken("");
+      setAccountMessage("Account connected. Plan status updated.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Failed to save token.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleSignOut() {
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onClearSession();
+      setAccountMessage("Signed out from this desktop app.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Failed to sign out.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleRefreshEntitlement() {
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onRefreshEntitlement();
+      setAccountMessage("Plan status refreshed.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Refresh failed.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleStartCheckout() {
+    setCheckoutBusy(true);
+    setAccountMessage("");
+    try {
+      await onStartCheckout(selectedPlan, selectedInterval);
+      setAccountMessage("Checkout opened in your browser. Return here after payment to refresh.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Unable to start checkout.");
+    } finally {
+      setCheckoutBusy(false);
+    }
+  }
+
   return (
     <div className="voxly-page">
       <div className="voxly-section-header">
@@ -660,16 +797,80 @@ function SettingsPage({
         <div className="settings-row">
           <div>
             <h3>Text cleanup</h3>
-            <p>Automatically polish punctuation and casing after you dictate.</p>
+            <p>
+              Automatically polish punctuation and casing after you dictate.
+              {!entitlement.canUseCleanup ? " Upgrade to an active paid plan to enable this feature." : ""}
+            </p>
           </div>
           <label className="settings-toggle" aria-label="Toggle text cleanup">
             <input
               type="checkbox"
               checked={settings.cleanupEnabled}
+              disabled={!entitlement.canUseCleanup}
               onChange={(e) => void onPatchSettings({ cleanupEnabled: e.target.checked })}
             />
             <span className="settings-toggle__track" />
           </label>
+        </div>
+
+        <div className="settings-row settings-row--stacked">
+          <div>
+            <h3>Account & billing</h3>
+            <p>
+              Manage subscription directly in the desktop app. Current plan: {formatPlanLabel(entitlement.billingPlan)}
+              {` (${entitlement.billingStatus.replace("_", " ")}).`}
+            </p>
+          </div>
+          <div className="settings-row__actions">
+            <input
+              className="settings-input settings-input--mono"
+              value={sessionToken}
+              onChange={(e) => setSessionToken(e.target.value)}
+              placeholder="Paste Supabase access token"
+              aria-label="Session access token"
+            />
+            <TextButton variant="primary" disabled={accountBusy || !sessionToken.trim()} onClick={() => void handleSaveSessionToken()}>
+              <LogIn size={16} />
+              Connect Account
+            </TextButton>
+            <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
+              <RefreshCw size={16} />
+              Refresh Plan
+            </TextButton>
+            <TextButton variant="quiet" disabled={accountBusy || !entitlement.isAuthenticated} onClick={() => void handleSignOut()}>
+              <LogOut size={16} />
+              Sign Out
+            </TextButton>
+          </div>
+          <div className="settings-row__actions">
+            <select
+              className="settings-input"
+              value={selectedPlan}
+              onChange={(e) => setSelectedPlan(e.target.value as PaidPlan)}
+              aria-label="Checkout plan"
+            >
+              <option value="starter">Starter</option>
+              <option value="pro">Pro</option>
+            </select>
+            <select
+              className="settings-input"
+              value={selectedInterval}
+              onChange={(e) => setSelectedInterval(e.target.value as BillingInterval)}
+              aria-label="Checkout interval"
+            >
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+            <TextButton
+              variant="primary"
+              disabled={checkoutBusy || !entitlement.isAuthenticated}
+              onClick={() => void handleStartCheckout()}
+            >
+              <CreditCard size={16} />
+              {checkoutBusy ? "Opening Checkout..." : "Start Checkout"}
+            </TextButton>
+          </div>
+          {!!accountMessage && <p>{accountMessage}</p>}
         </div>
 
         <div className="settings-row">
