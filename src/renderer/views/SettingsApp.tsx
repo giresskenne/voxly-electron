@@ -8,10 +8,13 @@ import {
   CheckCircle2,
   ChevronRight,
   Circle,
+  CreditCard,
   Globe,
   HelpCircle,
   Home,
   LockKeyhole,
+  LogIn,
+  LogOut,
   Mic,
   MousePointerClick,
   Plus,
@@ -29,7 +32,14 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { AppSettings, RuntimeStatus, TranscriptionRecord } from "../../main/types";
+import type {
+  AppSettings,
+  BillingInterval,
+  EntitlementStatus,
+  PaidPlan,
+  RuntimeStatus,
+  TranscriptionRecord,
+} from "../../main/types";
 import { BrandMark } from "../components/BrandMark";
 import { TextButton } from "../components/Controls";
 import { modelOptions } from "../design/source";
@@ -37,6 +47,24 @@ import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 
 const log = createRendererLogger("settings-ui");
+const ENTITLEMENT_REFRESH_MS = 60_000;
+
+const DEFAULT_ENTITLEMENT: EntitlementStatus = {
+  isAuthenticated: false,
+  billingPlan: "free",
+  billingStatus: "unknown",
+  canUseCloudTranscription: false,
+  canUseCleanup: false,
+  checkedAt: new Date(0).toISOString(),
+  source: "default",
+  reason: "not-checked",
+};
+
+function formatPlanLabel(plan: EntitlementStatus["billingPlan"]): string {
+  if (plan === "pro") return "Pro plan";
+  if (plan === "starter") return "Starter plan";
+  return "Free plan";
+}
 const hotkeyModeOptions: Array<{
   value: AppSettings["mode"];
   label: string;
@@ -60,6 +88,7 @@ const hotkeyModeOptions: Array<{
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
+  const [entitlement, setEntitlement] = useState<EntitlementStatus>(DEFAULT_ENTITLEMENT);
   const [history, setHistory] = useState<TranscriptionRecord[]>([]);
   const [activeSection, setActiveSection] = useState("home");
 
@@ -70,28 +99,68 @@ export function SettingsApp() {
     const offSaved = window.electronAPI.onTranscriptionSaved(() => {
       window.electronAPI.listHistory(20).then(setHistory);
     });
+    const offSettings = window.electronAPI.onSettingsUpdated((nextSettings) => {
+      setSettings(nextSettings);
+    });
+    const offDeepLink = window.electronAPI.onDeepLink((url) => {
+      log.info("Received deep link", { url });
+      void handleDeepLink(url);
+    });
     return () => {
       log.info("Settings app unmounted");
       offRuntime();
       offSaved();
+      offSettings();
+      offDeepLink();
     };
   }, []);
 
+  useEffect(() => {
+    const syncOnResume = () => {
+      void syncEntitlement(true);
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        void syncEntitlement(true);
+      }
+    };
+    window.addEventListener("focus", syncOnResume);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(() => {
+      void syncEntitlement(true);
+    }, ENTITLEMENT_REFRESH_MS);
+
+    return () => {
+      window.removeEventListener("focus", syncOnResume);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  async function syncEntitlement(force = false) {
+    const synced = await window.electronAPI.syncEntitlement(force);
+    setEntitlement(synced.entitlements);
+    setSettings(synced.settings);
+  }
+
   async function refresh() {
     log.debug("Refreshing settings screen data");
-    const [nextSettings, nextRuntime, nextHistory] = await Promise.all([
-      window.electronAPI.getSettings(),
+    const [synced, nextRuntime, nextHistory] = await Promise.all([
+      window.electronAPI.syncEntitlement(),
       window.electronAPI.getRuntimeStatus(),
       window.electronAPI.listHistory(20),
     ]);
     log.info("Settings screen data refreshed", {
       runtime: nextRuntime,
       historyCount: nextHistory.length,
-      onboardingComplete: nextSettings.onboardingComplete,
+      onboardingComplete: synced.settings.onboardingComplete,
+      billingPlan: synced.entitlements.billingPlan,
+      billingStatus: synced.entitlements.billingStatus,
     });
-    setSettings(nextSettings);
+    setSettings(synced.settings);
     setRuntime(nextRuntime);
     setHistory(nextHistory);
+    setEntitlement(synced.entitlements);
   }
 
   async function patchSettings(patch: Partial<AppSettings>) {
@@ -102,9 +171,48 @@ export function SettingsApp() {
     log.info("Settings patch applied", patch);
   }
 
+  async function handleDeepLink(url: string) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      log.warn("Invalid deep link", { url });
+      return;
+    }
+
+    const isAuthCallback = parsed.protocol === "dictafun:" && parsed.hostname === "auth";
+    if (!isAuthCallback) return;
+
+    const token = parsed.searchParams.get("token") ?? "";
+    if (!token.trim()) {
+      log.warn("Auth callback missing token");
+      return;
+    }
+
+    log.info("Applying auth callback token");
+    await window.electronAPI.setSessionToken(token);
+    await syncEntitlement(true);
+  }
+
+  async function saveSessionToken(token: string) {
+    await window.electronAPI.setSessionToken(token);
+    await syncEntitlement(true);
+  }
+
+  async function clearSession() {
+    await window.electronAPI.clearSessionToken();
+    await syncEntitlement(true);
+  }
+
+  async function startCheckout(plan: PaidPlan, interval: BillingInterval) {
+    const session = await window.electronAPI.startCheckout({ plan, interval });
+    await syncEntitlement(true);
+    return session;
+  }
+
 
   if (!settings || !runtime) {
-    return <div className="app-loading">Loading Voxly...</div>;
+    return <div className="app-loading">Loading Dicta Fun...</div>;
   }
 
   if (!settings.onboardingComplete) {
@@ -155,17 +263,25 @@ export function SettingsApp() {
         {/* Upgrade card */}
         <div className="voxly-upgrade-card">
           <div className="voxly-upgrade-card__header">
-            <span>Free plan</span>
+            <span>{formatPlanLabel(entitlement.billingPlan)}</span>
           </div>
           <div className="voxly-upgrade-card__usage">
             <div className="voxly-upgrade-card__bar">
               <div className="voxly-upgrade-card__bar-fill" style={{ width: "40%" }} />
             </div>
-            <p>400 / 1,000 words remaining</p>
+            <p>
+              {entitlement.isAuthenticated
+                ? `Status: ${entitlement.billingStatus.replace("_", " ")}`
+                : "Sign in to unlock paid features"}
+            </p>
           </div>
-          <button type="button" className="voxly-upgrade-btn">
+          <button
+            type="button"
+            className="voxly-upgrade-btn"
+            onClick={() => window.electronAPI.openWebRoute("pricing")}
+          >
             <Star size={14} />
-            Upgrade to Pro
+            {entitlement.billingPlan === "pro" ? "Manage plan" : "Upgrade to Pro"}
           </button>
         </div>
 
@@ -174,7 +290,7 @@ export function SettingsApp() {
           <button
             type="button"
             className="voxly-secondary-nav__item"
-            onClick={() => setActiveSection("settings")}
+            onClick={() => window.electronAPI.openWebRoute("signup")}
           >
             <Users size={16} />
             <span>Invite a friend</span>
@@ -190,18 +306,18 @@ export function SettingsApp() {
           <button
             type="button"
             className="voxly-secondary-nav__item"
-              onClick={() => window.electronAPI.openURL("https://dictafun.com/privacy")}
+            onClick={() => window.electronAPI.openWebRoute("privacy")}
           >
             <Shield size={16} />
             <span>Privacy</span>
           </button>
-            <button
-              type="button"
-              className="voxly-secondary-nav__item"
-              onClick={() => window.electronAPI.openURL("https://dictafun.com/terms")}
-            >
+          <button
+            type="button"
+            className="voxly-secondary-nav__item"
+            onClick={() => window.electronAPI.openWebRoute("terms")}
+          >
             <HelpCircle size={16} />
-              <span>Terms</span>
+            <span>Terms</span>
           </button>
         </nav>
 
@@ -209,7 +325,7 @@ export function SettingsApp() {
         <button
           type="button"
           className="voxly-profile"
-          onClick={() => setActiveSection("settings")}
+          onClick={() => window.electronAPI.openWebRoute("signin")}
           aria-label="Account settings"
         >
           <div className="voxly-profile__avatar">
@@ -217,7 +333,7 @@ export function SettingsApp() {
           </div>
           <div className="voxly-profile__info">
             <span className="voxly-profile__name">{settings.agentName || "Your account"}</span>
-            <span className="voxly-profile__plan">Free plan</span>
+            <span className="voxly-profile__plan">{formatPlanLabel(entitlement.billingPlan)}</span>
           </div>
         </button>
       </aside>
@@ -233,7 +349,16 @@ export function SettingsApp() {
           <DictionaryPage settings={settings} onPatchSettings={patchSettings} />
         )}
         {activeSection === "settings" && (
-          <SettingsPage settings={settings} runtime={runtime} onPatchSettings={patchSettings} />
+          <SettingsPage
+            settings={settings}
+            runtime={runtime}
+            entitlement={entitlement}
+            onPatchSettings={patchSettings}
+            onSaveSessionToken={saveSessionToken}
+            onClearSession={clearSession}
+            onStartCheckout={startCheckout}
+            onRefreshEntitlement={() => syncEntitlement(true)}
+          />
         )}
       </section>
     </main>
@@ -274,7 +399,7 @@ function HomePage({ history, settings }: { history: TranscriptionRecord[]; setti
       {/* Hero banner */}
       <div className="home-banner">
         <div className="home-banner__copy">
-          <h1>Speak naturally.<br /><span>Voxly writes it clearly.</span></h1>
+          <h1>Speak naturally.<br /><span>Dicta Fun writes it clearly.</span></h1>
           <p>Press the shortcut or start a recording to turn your thoughts into polished text.</p>
         </div>
         <div className="home-banner__actions">
@@ -352,7 +477,7 @@ function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
     <div className="voxly-page">
       <div className="voxly-section-header">
         <h2>Your insights</h2>
-        <p>A summary of how you've been using Voxly.</p>
+        <p>A summary of how you've been using Dicta Fun.</p>
       </div>
 
       {!hasData ? (
@@ -460,8 +585,8 @@ function DictionaryPage({
           <BookOpen size={22} />
         </div>
         <div>
-          <h3>Voxly learns the words you use.</h3>
-          <p>Add names, company terms, acronyms, and phrases so Voxly writes them correctly every time.</p>
+          <h3>Dicta Fun learns the words you use.</h3>
+          <p>Add names, company terms, acronyms, and phrases so Dicta Fun writes them correctly every time.</p>
         </div>
       </div>
 
@@ -498,7 +623,7 @@ function DictionaryPage({
           <p>{words.length === 0 ? "No words yet." : "No matches."}</p>
           <small>
             {words.length === 0
-              ? "Add words Voxly should recognise — names, brands, or technical terms."
+              ? "Add words Dicta Fun should recognise — names, brands, or technical terms."
               : "Try a different search."}
           </small>
         </div>
@@ -528,24 +653,99 @@ function DictionaryPage({
 function SettingsPage({
   settings,
   runtime,
+  entitlement,
   onPatchSettings,
+  onSaveSessionToken,
+  onClearSession,
+  onStartCheckout,
+  onRefreshEntitlement,
 }: {
   settings: AppSettings;
   runtime: RuntimeStatus;
+  entitlement: EntitlementStatus;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+  onSaveSessionToken: (token: string) => Promise<void>;
+  onClearSession: () => Promise<void>;
+  onStartCheckout: (plan: PaidPlan, interval: BillingInterval) => Promise<unknown>;
+  onRefreshEntitlement: () => Promise<void>;
 }) {
+  const [sessionToken, setSessionToken] = useState("");
+  const [selectedPlan, setSelectedPlan] = useState<PaidPlan>("starter");
+  const [selectedInterval, setSelectedInterval] = useState<BillingInterval>("monthly");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [accountMessage, setAccountMessage] = useState("");
+
+  async function handleSaveSessionToken() {
+    if (!sessionToken.trim()) {
+      setAccountMessage("Paste an access token first.");
+      return;
+    }
+
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onSaveSessionToken(sessionToken);
+      setSessionToken("");
+      setAccountMessage("Account connected. Plan status updated.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Failed to save token.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleSignOut() {
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onClearSession();
+      setAccountMessage("Signed out from this desktop app.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Failed to sign out.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleRefreshEntitlement() {
+    setAccountBusy(true);
+    setAccountMessage("");
+    try {
+      await onRefreshEntitlement();
+      setAccountMessage("Plan status refreshed.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Refresh failed.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleStartCheckout() {
+    setCheckoutBusy(true);
+    setAccountMessage("");
+    try {
+      await onStartCheckout(selectedPlan, selectedInterval);
+      setAccountMessage("Checkout opened in your browser. Return here after payment to refresh.");
+    } catch (error) {
+      setAccountMessage(error instanceof Error ? error.message : "Unable to start checkout.");
+    } finally {
+      setCheckoutBusy(false);
+    }
+  }
+
   return (
     <div className="voxly-page">
       <div className="voxly-section-header">
         <h2>Settings</h2>
-        <p>Manage your Voxly preferences.</p>
+        <p>Manage your Dicta Fun preferences.</p>
       </div>
 
       <div className="settings-rows">
         <div className="settings-row">
           <div>
             <h3>Your name</h3>
-            <p>How Voxly refers to you when cleaning up dictations.</p>
+            <p>How Dicta Fun refers to you when cleaning up dictations.</p>
           </div>
           <input
             className="settings-input"
@@ -568,7 +768,7 @@ function SettingsPage({
         <div className="settings-row settings-row--stacked">
           <div>
             <h3>Hotkey mode</h3>
-            <p>Choose how Voxly starts and stops recording from the global shortcut.</p>
+            <p>Choose how Dicta Fun starts and stops recording from the global shortcut.</p>
           </div>
           <div className="settings-mode-options" role="radiogroup" aria-label="Hotkey mode">
             {hotkeyModeOptions.map((option) => {
@@ -597,32 +797,98 @@ function SettingsPage({
         <div className="settings-row">
           <div>
             <h3>Text cleanup</h3>
-            <p>Automatically polish punctuation and casing after you dictate.</p>
+            <p>
+              Automatically polish punctuation and casing after you dictate.
+              {!entitlement.canUseCleanup ? " Upgrade to an active paid plan to enable this feature." : ""}
+            </p>
           </div>
           <label className="settings-toggle" aria-label="Toggle text cleanup">
             <input
               type="checkbox"
               checked={settings.cleanupEnabled}
+              disabled={!entitlement.canUseCleanup}
               onChange={(e) => void onPatchSettings({ cleanupEnabled: e.target.checked })}
             />
             <span className="settings-toggle__track" />
           </label>
         </div>
 
+        <div className="settings-row settings-row--stacked">
+          <div>
+            <h3>Account & billing</h3>
+            <p>
+              Manage subscription directly in the desktop app. Current plan: {formatPlanLabel(entitlement.billingPlan)}
+              {` (${entitlement.billingStatus.replace("_", " ")}).`}
+            </p>
+          </div>
+          <div className="settings-row__actions">
+            <input
+              className="settings-input settings-input--mono"
+              value={sessionToken}
+              onChange={(e) => setSessionToken(e.target.value)}
+              placeholder="Paste Supabase access token"
+              aria-label="Session access token"
+            />
+            <TextButton variant="primary" disabled={accountBusy || !sessionToken.trim()} onClick={() => void handleSaveSessionToken()}>
+              <LogIn size={16} />
+              Connect Account
+            </TextButton>
+            <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
+              <RefreshCw size={16} />
+              Refresh Plan
+            </TextButton>
+            <TextButton variant="quiet" disabled={accountBusy || !entitlement.isAuthenticated} onClick={() => void handleSignOut()}>
+              <LogOut size={16} />
+              Sign Out
+            </TextButton>
+          </div>
+          <div className="settings-row__actions">
+            <select
+              className="settings-input"
+              value={selectedPlan}
+              onChange={(e) => setSelectedPlan(e.target.value as PaidPlan)}
+              aria-label="Checkout plan"
+            >
+              <option value="starter">Starter</option>
+              <option value="pro">Pro</option>
+            </select>
+            <select
+              className="settings-input"
+              value={selectedInterval}
+              onChange={(e) => setSelectedInterval(e.target.value as BillingInterval)}
+              aria-label="Checkout interval"
+            >
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+            <TextButton
+              variant="primary"
+              disabled={checkoutBusy || !entitlement.isAuthenticated}
+              onClick={() => void handleStartCheckout()}
+            >
+              <CreditCard size={16} />
+              {checkoutBusy ? "Opening Checkout..." : "Start Checkout"}
+            </TextButton>
+          </div>
+          {!!accountMessage && <p>{accountMessage}</p>}
+        </div>
+
         <div className="settings-row">
           <div>
             <h3>Permissions</h3>
-            <p>Microphone and accessibility access required for dictation.</p>
+            <p>Microphone{runtime.platform === "darwin" ? " and accessibility" : ""} access required for dictation.</p>
           </div>
           <div className="settings-row__actions">
             <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
               <Mic size={16} />
               Microphone…
             </TextButton>
-            <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-              <ShieldAlert size={16} />
-              Accessibility…
-            </TextButton>
+            {runtime.platform === "darwin" && (
+              <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+                <ShieldAlert size={16} />
+                Accessibility…
+              </TextButton>
+            )}
           </div>
         </div>
       </div>
@@ -641,28 +907,28 @@ const onboardingSteps: Array<{
     id: "welcome",
     eyebrow: "Setup",
     title: "Make dictation feel native.",
-    summary: "Voxly stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
+    summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
     icon: Sparkles,
   },
   {
     id: "permissions",
     eyebrow: "Access",
     title: "Grant only what dictation needs.",
-    summary: "Microphone access captures speech. Accessibility lets Voxly paste the result back at the cursor.",
+    summary: "Microphone access captures speech. On macOS, Accessibility lets Dicta Fun paste the result back at the cursor.",
     icon: LockKeyhole,
   },
   {
     id: "test",
     eyebrow: "Try It",
     title: "Speak and see it typed.",
-    summary: "Record a short clip — Voxly will transcribe it here so you know your microphone and model are working before you start.",
+    summary: "Record a short clip — Dicta Fun will transcribe it here so you know your microphone and model are working before you start.",
     icon: Mic,
   },
   {
     id: "finish",
     eyebrow: "Ready",
     title: "Try it from anywhere.",
-    summary: "Open the overlay, press your shortcut, speak, and Voxly will paste the transcript where your cursor is focused.",
+    summary: "Open the overlay, press your shortcut, speak, and Dicta Fun will paste the transcript where your cursor is focused.",
     icon: MousePointerClick,
   },
 ];
@@ -768,7 +1034,7 @@ function OnboardingFlow({
               {isLast ? (
                 <>
                   <Check size={17} />
-                  Start Using Voxly
+                  Start Using Dicta Fun
                 </>
               ) : (
                 <>
@@ -839,17 +1105,19 @@ function PermissionsStep({
           Open Settings...
         </TextButton>
       </SetupRow>
-      <SetupRow
-        icon={ShieldAlert}
-        title="Accessibility"
-        detail="Required on macOS for reliable paste-at-cursor behavior."
-        status={runtime.accessibility}
-        ok={accessibilityOk}
-      >
-        <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-          Open Settings...
-        </TextButton>
-      </SetupRow>
+      {runtime.platform === "darwin" && (
+        <SetupRow
+          icon={ShieldAlert}
+          title="Accessibility"
+          detail="Required on macOS for reliable paste-at-cursor behavior."
+          status={runtime.accessibility}
+          ok={accessibilityOk}
+        >
+          <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+            Open Settings...
+          </TextButton>
+        </SetupRow>
+      )}
       <TextButton variant="quiet" onClick={() => void onRefresh()}>
         <RefreshCw size={17} />
         Refresh Status

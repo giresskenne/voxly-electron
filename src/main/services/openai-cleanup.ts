@@ -1,6 +1,7 @@
 import type { AppSettings, TranscriptionRecord } from "../types";
 import { createMainLogger } from "../debug-log";
 import { credentialStore } from "./credential-store";
+import { fetchBackend, getBackendSessionToken, parseBackendError, resolveBackendBaseUrl } from "./backend-api";
 
 const log = createMainLogger("openai-cleanup");
 
@@ -23,19 +24,37 @@ type ChatCompletionResponse = {
   };
 };
 
+type BackendCleanupResponse = {
+  text?: unknown;
+  processedText?: unknown;
+  method?: unknown;
+  error?: {
+    message?: unknown;
+  };
+};
+
 export class OpenAiCleanupService {
   async process(text: string, settings: AppSettings): Promise<CleanupResult> {
     const normalized = text.replace(/\s+/g, " ").trim();
     if (!normalized) return { text: "", method: "cleanup" };
 
+    const agentInstruction = this.extractAgentInstruction(normalized, settings.agentName);
+    const method: CleanupResult["method"] = agentInstruction ? "agent" : "cleanup";
+
+    const backendBaseUrl = resolveBackendBaseUrl();
+    const backendToken = backendBaseUrl ? await getBackendSessionToken() : "";
+    if (backendBaseUrl && backendToken) {
+      return this.processWithBackend(normalized, settings, method, agentInstruction);
+    }
+
     const apiKey = await this.resolveApiKey(settings);
     if (!apiKey) {
-      log.warn("No API key configured — skipping cleanup, returning raw transcription");
+      log.warn("No backend session or OpenAI API key configured — skipping cleanup, returning raw transcription", {
+        backendConfigured: Boolean(backendBaseUrl),
+      });
       return { text: normalized, method: "none" as const };
     }
 
-    const agentInstruction = this.extractAgentInstruction(normalized, settings.agentName);
-    const method: CleanupResult["method"] = agentInstruction ? "agent" : "cleanup";
     const messages = agentInstruction
       ? this.agentMessages(settings.agentName, normalized, agentInstruction)
       : this.cleanupMessages(normalized);
@@ -75,6 +94,49 @@ export class OpenAiCleanupService {
 
     log.info("OpenAI cleanup completed", { method, originalLength: normalized.length, processedLength: processed.length });
     return { text: processed, method };
+  }
+
+  private async processWithBackend(
+    text: string,
+    settings: AppSettings,
+    method: CleanupResult["method"],
+    agentInstruction: string | null,
+  ): Promise<CleanupResult> {
+    const started = Date.now();
+    const response = await fetchBackend("/ai/cleanup", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text,
+        method,
+        agentName: settings.agentName,
+        instruction: agentInstruction,
+      }),
+    });
+
+    const body = await response.text();
+    const payload = this.parseBackendCleanupResponse(body);
+
+    log.debug("Backend cleanup response received", {
+      status: response.status,
+      elapsedMs: Date.now() - started,
+      method,
+    });
+
+    if (!response.ok) {
+      throw new Error(parseBackendError(body, `Backend cleanup returned ${response.status}`));
+    }
+
+    const processed = this.extractBackendText(payload);
+    if (!processed) {
+      throw new Error("Backend cleanup returned an empty response.");
+    }
+
+    const backendMethod = this.extractBackendMethod(payload.method) ?? method;
+    log.info("Backend cleanup completed", { method: backendMethod, originalLength: text.length, processedLength: processed.length });
+    return { text: processed, method: backendMethod };
   }
 
   private cleanupMessages(text: string) {
@@ -130,6 +192,25 @@ export class OpenAiCleanupService {
     } catch {
       return { error: { message: body } };
     }
+  }
+
+  private parseBackendCleanupResponse(body: string): BackendCleanupResponse {
+    if (!body) return {};
+    try {
+      return JSON.parse(body) as BackendCleanupResponse;
+    } catch {
+      return { error: { message: body } };
+    }
+  }
+
+  private extractBackendText(payload: BackendCleanupResponse): string {
+    const text = typeof payload.text === "string" ? payload.text : payload.processedText;
+    return typeof text === "string" ? text.trim() : "";
+  }
+
+  private extractBackendMethod(method: unknown): CleanupResult["method"] | null {
+    if (method === "cleanup" || method === "agent" || method === "none") return method;
+    return null;
   }
 }
 

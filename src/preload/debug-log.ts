@@ -4,7 +4,7 @@ export function createPreloadLogger(scope: string) {
   function write(level: LogLevel, message: string, details?: unknown): void {
     if (!isDebugEnabled()) return;
 
-    const prefix = `[Voxly:${scope}] ${message}`;
+    const prefix = `[Dicta Fun:${scope}] ${message}`;
     if (details === undefined) {
       console[level](prefix);
       return;

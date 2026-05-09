@@ -11,6 +11,8 @@ import { registerDictationHotkey } from "./services/hotkeys";
 import { globeKeyManager } from "./services/globe-key-manager";
 import { createMainLogger, getLogLevel, logRendererEntry } from "./debug-log";
 import type { AudioChunk } from "./types";
+import { entitlementService } from "./services/entitlements";
+import { billingService } from "./services/billing";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
@@ -19,6 +21,19 @@ const PUSH_STOP_COOLDOWN_MS = 300;
 let pushKeyDownAt = 0;
 let pushKeyIsRecording = false;
 let pushLastStopAt = 0;
+
+const ALLOWED_EXTERNAL_HOSTS = new Set(["dictafun.com", "www.dictafun.com"]);
+
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return ALLOWED_EXTERNAL_HOSTS.has(host) || host.endsWith(".dictafun.com");
+  } catch {
+    return false;
+  }
+}
 
 export function registerIpc(): void {
   log.info("Registering IPC handlers");
@@ -30,8 +45,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("settings:update", async (_, patch: Partial<AppSettings>) => {
     log.debug("IPC settings:update", patch);
-    const settings = await settingsStore.save(patch);
-    if (shouldRefreshWhisper(patch)) {
+    const entitlements = await entitlementService.refresh();
+    const gatedPatch = entitlementService.gateSettingsPatch(patch, entitlements);
+    const settings = await settingsStore.save(gatedPatch);
+    if (shouldRefreshWhisper(gatedPatch)) {
       await whisperService.prewarm(settings);
     }
     configureDictationHotkey(settings);
@@ -39,6 +56,49 @@ export function registerIpc(): void {
     windows.sendRuntimeStatus(getRuntimeStatus());
     log.info("Settings updated via IPC", { hotkeyRegistered });
     return settings;
+  });
+
+  ipcMain.handle("auth:set-session-token", async (_, token: string) => {
+    await entitlementService.setSessionToken(token);
+    const entitlements = await entitlementService.refresh(true);
+    await applyEntitlementGates(entitlements);
+    log.info("Session token updated", {
+      authenticated: entitlements.isAuthenticated,
+      billingPlan: entitlements.billingPlan,
+      billingStatus: entitlements.billingStatus,
+    });
+    return entitlements;
+  });
+
+  ipcMain.handle("auth:clear-session-token", async () => {
+    await entitlementService.clearSessionToken();
+    const entitlements = await entitlementService.refresh(true);
+    await applyEntitlementGates(entitlements);
+    log.info("Session token cleared");
+    return entitlements;
+  });
+
+  ipcMain.handle("entitlement:get", async (_, force?: boolean) => {
+    const entitlements = await entitlementService.refresh(Boolean(force));
+    log.debug("IPC entitlement:get", {
+      force: Boolean(force),
+      source: entitlements.source,
+      billingPlan: entitlements.billingPlan,
+      billingStatus: entitlements.billingStatus,
+      authenticated: entitlements.isAuthenticated,
+    });
+    return entitlements;
+  });
+
+  ipcMain.handle("entitlement:sync", async (_, force?: boolean) => {
+    const entitlements = await entitlementService.refresh(Boolean(force));
+    const settings = await applyEntitlementGates(entitlements);
+    return { entitlements, settings };
+  });
+
+  ipcMain.handle("billing:start-checkout", async (_, payload: { plan: "starter" | "pro"; interval: "monthly" | "yearly" }) => {
+    log.info("IPC billing:start-checkout", payload);
+    return billingService.startCheckout(payload);
   });
 
   ipcMain.handle("window:start-drag", () => {
@@ -68,7 +128,11 @@ export function registerIpc(): void {
       chunkCount: chunks?.length ?? 0,
       options,
     });
-    const settings = { ...settingsStore.get(), ...options };
+    const entitlement = await entitlementService.refresh();
+    const settings = entitlementService.gateSettings(
+      { ...settingsStore.get(), ...options },
+      entitlement,
+    );
 
     const t0 = Date.now();
     const originalText = await transcribeAudio(buffer, settings, chunks ?? []);
@@ -162,10 +226,27 @@ export function registerIpc(): void {
     return shell.openExternal(urls[kind]);
   });
 
-    ipcMain.handle("app:open-url", (_, url: string) => {
-      log.debug("IPC app:open-url", { url });
-      return shell.openExternal(url);
-    });
+  ipcMain.handle("app:open-web-route", (_, route: "pricing" | "signup" | "signin" | "privacy" | "terms") => {
+    const routes = {
+      pricing: "https://dictafun.com/pricing",
+      signup: "https://dictafun.com/signup",
+      signin: "https://dictafun.com/signin",
+      privacy: "https://dictafun.com/privacy",
+      terms: "https://dictafun.com/terms",
+    } as const;
+    const url = routes[route];
+    log.debug("IPC app:open-web-route", { route, url });
+    return shell.openExternal(url);
+  });
+
+  ipcMain.handle("app:open-url", (_, url: string) => {
+    if (!isAllowedExternalUrl(url)) {
+      log.warn("IPC app:open-url blocked", { url });
+      throw new Error("Blocked external URL");
+    }
+    log.debug("IPC app:open-url", { url });
+    return shell.openExternal(url);
+  });
 
   ipcMain.handle("runtime:status", () => {
     const status = getRuntimeStatus();
@@ -180,6 +261,31 @@ export function registerIpc(): void {
   ipcMain.handle("log:get-level", () => {
     return getLogLevel();
   });
+}
+
+async function applyEntitlementGates(entitlements: ReturnType<typeof entitlementService.getCached>): Promise<AppSettings> {
+  const current = settingsStore.get();
+  const gated = entitlementService.gateSettings(current, entitlements);
+
+  const changed =
+    gated.transcriptionMode !== current.transcriptionMode ||
+    gated.cleanupEnabled !== current.cleanupEnabled;
+
+  if (!changed) {
+    return current;
+  }
+
+  const patch: Partial<AppSettings> = {
+    transcriptionMode: gated.transcriptionMode,
+    cleanupEnabled: gated.cleanupEnabled,
+  };
+  const settings = await settingsStore.save(patch);
+  if (shouldRefreshWhisper(patch)) {
+    await whisperService.prewarm(settings);
+  }
+  windows.sendSettingsUpdated(settings);
+  windows.sendRuntimeStatus(getRuntimeStatus());
+  return settings;
 }
 
 export function registerInitialHotkey(): void {
@@ -205,7 +311,7 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
   if (settings.mockTranscription) {
     log.debug("Returning mock transcription", { transcriptionMode: settings.transcriptionMode });
     await new Promise((resolve) => setTimeout(resolve, 650));
-    return "Voxly captured this dictation and is ready to paste it anywhere you are working.";
+    return "Dicta Fun captured this dictation and is ready to paste it anywhere you are working.";
   }
 
   if (settings.transcriptionMode === "cloud") {

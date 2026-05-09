@@ -7,23 +7,67 @@ import { transcriptionDatabase } from "./services/database";
 import { whisperService } from "./services/whisper";
 import { unregisterHotkeys } from "./services/hotkeys";
 import { globeKeyManager } from "./services/globe-key-manager";
+import { entitlementService } from "./services/entitlements";
 import { windows } from "./window-manager";
 import { createMainLogger, ensureFileLogging } from "./debug-log";
 
-// Load project-root .env so OPENAI_API_KEY / GROQ_API_KEY are in process.env at runtime
+// Development reads the ignored project .env. Packaged CI builds include
+// resources/runtime.env with non-secret runtime config such as VITE_API_URL.
 loadDotenv({ path: path.join(__dirname, "../../.env") });
+loadDotenv({ path: path.join(__dirname, "../../resources/runtime.env"), override: true });
 
 const log = createMainLogger("main");
+const DEEP_LINK_PROTOCOL = "dictafun";
+const pendingDeepLinks: string[] = [];
+
+function getDeepLinkFromArgv(argv: string[]): string | null {
+  const prefix = `${DEEP_LINK_PROTOCOL}://`;
+  return argv.find((arg) => arg.toLowerCase().startsWith(prefix)) ?? null;
+}
+
+function dispatchDeepLink(url: string): void {
+  pendingDeepLinks.push(url);
+  windows.createSettings();
+  const settingsWindow = windows.settings;
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+
+  while (pendingDeepLinks.length > 0) {
+    const next = pendingDeepLinks.shift();
+    if (!next) continue;
+    settingsWindow.webContents.send("app:deep-link", next);
+  }
+}
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
+app.on("second-instance", (_event, argv) => {
+  const deepLink = getDeepLinkFromArgv(argv);
+  if (!deepLink) return;
+  log.info("Received deep link from second instance", { deepLink });
+  dispatchDeepLink(deepLink);
+});
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  log.info("Received deep link via open-url", { url });
+  dispatchDeepLink(url);
+});
 
 // Set app name before ready so it shows correctly in Accessibility settings
-app.name = "Voxly";
+app.name = "Dicta Fun";
 app.commandLine.appendSwitch("enable-features", "GlobalShortcutsPortal");
 log.info("App bootstrapping", { isPackaged: app.isPackaged, platform: process.platform });
 
 app.whenReady().then(async () => {
   ensureFileLogging();
   log.info("Electron ready");
-  app.setAppUserModelId("com.voxly.desktop");
+  app.setAppUserModelId("com.dictafun.desktop");
+  if (!app.isDefaultProtocolClient(DEEP_LINK_PROTOCOL)) {
+    app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL);
+  }
 
   // Packaged builds: electron-builder sets the icon via resources/icon.icns automatically.
   // Dev mode: set it at runtime using the PNG (nativeImage can't load .icns without a bundle).
@@ -60,7 +104,7 @@ app.whenReady().then(async () => {
     log.info("Accessibility trusted", { trusted });
     if (!trusted) {
       // Prompt=true opens the System Preferences dialog for the user to grant access.
-      // In dev mode the entry shows as "Electron"; in a packaged build it shows as "Voxly".
+      // In dev mode the entry shows as "Electron"; in a packaged build it shows as "Dicta Fun".
       systemPreferences.isTrustedAccessibilityClient(true);
       log.info("Opened Accessibility permission prompt");
     }
@@ -68,6 +112,17 @@ app.whenReady().then(async () => {
 
   log.debug("Loading settings");
   await settingsStore.load();
+  const startupEntitlement = await entitlementService.refresh();
+  const gatedStartupSettings = entitlementService.gateSettings(settingsStore.get(), startupEntitlement);
+  if (
+    gatedStartupSettings.transcriptionMode !== settingsStore.get().transcriptionMode ||
+    gatedStartupSettings.cleanupEnabled !== settingsStore.get().cleanupEnabled
+  ) {
+    await settingsStore.save({
+      transcriptionMode: gatedStartupSettings.transcriptionMode,
+      cleanupEnabled: gatedStartupSettings.cleanupEnabled,
+    });
+  }
   log.debug("Initializing transcription database");
   await transcriptionDatabase.init();
   log.debug("Registering IPC handlers");
@@ -79,6 +134,11 @@ app.whenReady().then(async () => {
   windows.createOverlay();
   log.debug("Creating settings window");
   windows.createSettings();
+  const argvDeepLink = getDeepLinkFromArgv(process.argv);
+  if (argvDeepLink) {
+    log.info("Received deep link from process argv", { argvDeepLink });
+    dispatchDeepLink(argvDeepLink);
+  }
   log.debug("Registering initial hotkey");
   registerInitialHotkey();
   log.debug("Broadcasting initial runtime status", getRuntimeStatus());

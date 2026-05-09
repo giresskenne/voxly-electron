@@ -1,5 +1,38 @@
 export type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
 
+export type BillingPlan = "free" | "starter" | "pro";
+
+export type BillingInterval = "monthly" | "yearly";
+
+export type PaidPlan = Exclude<BillingPlan, "free">;
+
+export type CheckoutSession = {
+  transactionId: string;
+  checkoutUrl: string;
+  plan: PaidPlan;
+  interval: BillingInterval;
+  opened: boolean;
+};
+
+export type BillingStatus =
+  | "unknown"
+  | "active"
+  | "inactive"
+  | "paused"
+  | "past_due"
+  | "cancelled";
+
+export type EntitlementStatus = {
+  isAuthenticated: boolean;
+  billingPlan: BillingPlan;
+  billingStatus: BillingStatus;
+  canUseCloudTranscription: boolean;
+  canUseCleanup: boolean;
+  checkedAt: string;
+  source: "default" | "remote";
+  reason?: string;
+};
+
 export type AppSettings = {
   hotkey: string;
   mode: "push-to-talk" | "tap-to-talk";

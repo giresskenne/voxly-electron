@@ -158,7 +158,7 @@ export class WindowManager {
       height: 800,
       minWidth: 960,
       minHeight: 680,
-      title: "Voxly",
+      title: "Dicta Fun",
       show: false,
       backgroundColor: "#f8f9fb",
       webPreferences: {

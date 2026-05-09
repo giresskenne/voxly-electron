@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 export const brand = {
-  name: "Voxly",
+  name: "Dicta Fun",
   tagline: "Voice-first AI writing assistant",
   gradient: "var(--gradient-brand)",
 };
@@ -39,7 +39,7 @@ export const modelOptions = [
 
 export const writingModes = [
   { id: "cleanup", label: "Cleanup", icon: Sparkles, description: "Punctuation, casing, and filler cleanup." },
-  { id: "agent", label: "Agent", icon: Brain, description: "Command Voxly by saying the assistant name first." },
+  { id: "agent", label: "Agent", icon: Brain, description: "Command Dicta Fun by saying the assistant name first." },
   { id: "raw", label: "Raw", icon: Mic, description: "Paste the transcript exactly as Whisper returns it." },
 ];
 

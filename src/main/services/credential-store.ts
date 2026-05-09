@@ -5,7 +5,7 @@ import { createMainLogger } from "../debug-log";
 
 const log = createMainLogger("credentials");
 
-type CredentialName = "groqApiKey" | "openaiApiKey";
+type CredentialName = "groqApiKey" | "openaiApiKey" | "sessionToken";
 type CredentialFile = Partial<Record<CredentialName, string>>;
 
 export class CredentialStore {

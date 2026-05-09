@@ -100,7 +100,7 @@ export class WhisperService {
     if (settings.mockTranscription || this.status !== "ready") {
       log.debug("Returning mock transcription", { status: this.status });
       await new Promise((resolve) => setTimeout(resolve, 650));
-      return "Voxly captured this dictation and is ready to paste it anywhere you are working.";
+      return "Dicta Fun captured this dictation and is ready to paste it anywhere you are working.";
     }
 
     const dir = path.join(os.tmpdir(), "voxly");

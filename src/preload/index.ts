@@ -1,5 +1,14 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AppSettings, AudioChunk, RuntimeStatus, TranscriptionRecord } from "../main/types";
+import type {
+  AppSettings,
+  AudioChunk,
+  BillingInterval,
+  CheckoutSession,
+  EntitlementStatus,
+  PaidPlan,
+  RuntimeStatus,
+  TranscriptionRecord,
+} from "../main/types";
 import { createPreloadLogger } from "./debug-log";
 
 const log = createPreloadLogger("preload");
@@ -24,7 +33,16 @@ const api = {
   openPanel: () => invoke<void>("panel:open"),
   openPermissionSettings: (kind: "microphone" | "accessibility" | "sound-input") =>
     invoke<void>("permissions:open", kind),
-    openURL: (url: string) => invoke<void>("app:open-url", url),
+  openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms") =>
+    invoke<void>("app:open-web-route", route),
+  openURL: (url: string) => invoke<void>("app:open-url", url),
+  setSessionToken: (token: string) => invoke<EntitlementStatus>("auth:set-session-token", token),
+  clearSessionToken: () => invoke<EntitlementStatus>("auth:clear-session-token"),
+  getEntitlementStatus: (force?: boolean) => invoke<EntitlementStatus>("entitlement:get", force),
+  syncEntitlement: (force?: boolean) =>
+    invoke<{ entitlements: EntitlementStatus; settings: AppSettings }>("entitlement:sync", force),
+  startCheckout: (payload: { plan: PaidPlan; interval: BillingInterval }) =>
+    invoke<CheckoutSession>("billing:start-checkout", payload),
   getRuntimeStatus: () => invoke<RuntimeStatus>("runtime:status"),
   log: (entry: { level: string; message: string; meta?: unknown; scope?: string; source?: string }) =>
     invoke<void>("log:write", entry),
@@ -84,6 +102,11 @@ const api = {
     const listener = () => callback();
     ipcRenderer.on("transcription:saved", listener);
     return () => ipcRenderer.removeListener("transcription:saved", listener);
+  },
+  onDeepLink: (callback: (url: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, url: string) => callback(url);
+    ipcRenderer.on("app:deep-link", listener);
+    return () => ipcRenderer.removeListener("app:deep-link", listener);
   },
 };
 
