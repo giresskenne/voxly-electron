@@ -104,7 +104,7 @@ export function SettingsApp() {
 
 
   if (!settings || !runtime) {
-    return <div className="app-loading">Loading Voxly...</div>;
+    return <div className="app-loading">Loading Dicta Fun...</div>;
   }
 
   if (!settings.onboardingComplete) {
@@ -163,7 +163,11 @@ export function SettingsApp() {
             </div>
             <p>400 / 1,000 words remaining</p>
           </div>
-          <button type="button" className="voxly-upgrade-btn">
+          <button
+            type="button"
+            className="voxly-upgrade-btn"
+            onClick={() => window.electronAPI.openWebRoute("pricing")}
+          >
             <Star size={14} />
             Upgrade to Pro
           </button>
@@ -174,7 +178,7 @@ export function SettingsApp() {
           <button
             type="button"
             className="voxly-secondary-nav__item"
-            onClick={() => setActiveSection("settings")}
+            onClick={() => window.electronAPI.openWebRoute("signup")}
           >
             <Users size={16} />
             <span>Invite a friend</span>
@@ -190,18 +194,18 @@ export function SettingsApp() {
           <button
             type="button"
             className="voxly-secondary-nav__item"
-              onClick={() => window.electronAPI.openURL("https://dictafun.com/privacy")}
+            onClick={() => window.electronAPI.openWebRoute("privacy")}
           >
             <Shield size={16} />
             <span>Privacy</span>
           </button>
-            <button
-              type="button"
-              className="voxly-secondary-nav__item"
-              onClick={() => window.electronAPI.openURL("https://dictafun.com/terms")}
-            >
+          <button
+            type="button"
+            className="voxly-secondary-nav__item"
+            onClick={() => window.electronAPI.openWebRoute("terms")}
+          >
             <HelpCircle size={16} />
-              <span>Terms</span>
+            <span>Terms</span>
           </button>
         </nav>
 
@@ -209,7 +213,7 @@ export function SettingsApp() {
         <button
           type="button"
           className="voxly-profile"
-          onClick={() => setActiveSection("settings")}
+          onClick={() => window.electronAPI.openWebRoute("signin")}
           aria-label="Account settings"
         >
           <div className="voxly-profile__avatar">
@@ -274,7 +278,7 @@ function HomePage({ history, settings }: { history: TranscriptionRecord[]; setti
       {/* Hero banner */}
       <div className="home-banner">
         <div className="home-banner__copy">
-          <h1>Speak naturally.<br /><span>Voxly writes it clearly.</span></h1>
+          <h1>Speak naturally.<br /><span>Dicta Fun writes it clearly.</span></h1>
           <p>Press the shortcut or start a recording to turn your thoughts into polished text.</p>
         </div>
         <div className="home-banner__actions">
@@ -352,7 +356,7 @@ function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
     <div className="voxly-page">
       <div className="voxly-section-header">
         <h2>Your insights</h2>
-        <p>A summary of how you've been using Voxly.</p>
+        <p>A summary of how you've been using Dicta Fun.</p>
       </div>
 
       {!hasData ? (
@@ -460,8 +464,8 @@ function DictionaryPage({
           <BookOpen size={22} />
         </div>
         <div>
-          <h3>Voxly learns the words you use.</h3>
-          <p>Add names, company terms, acronyms, and phrases so Voxly writes them correctly every time.</p>
+          <h3>Dicta Fun learns the words you use.</h3>
+          <p>Add names, company terms, acronyms, and phrases so Dicta Fun writes them correctly every time.</p>
         </div>
       </div>
 
@@ -498,7 +502,7 @@ function DictionaryPage({
           <p>{words.length === 0 ? "No words yet." : "No matches."}</p>
           <small>
             {words.length === 0
-              ? "Add words Voxly should recognise — names, brands, or technical terms."
+              ? "Add words Dicta Fun should recognise — names, brands, or technical terms."
               : "Try a different search."}
           </small>
         </div>
@@ -538,14 +542,14 @@ function SettingsPage({
     <div className="voxly-page">
       <div className="voxly-section-header">
         <h2>Settings</h2>
-        <p>Manage your Voxly preferences.</p>
+        <p>Manage your Dicta Fun preferences.</p>
       </div>
 
       <div className="settings-rows">
         <div className="settings-row">
           <div>
             <h3>Your name</h3>
-            <p>How Voxly refers to you when cleaning up dictations.</p>
+            <p>How Dicta Fun refers to you when cleaning up dictations.</p>
           </div>
           <input
             className="settings-input"
@@ -568,7 +572,7 @@ function SettingsPage({
         <div className="settings-row settings-row--stacked">
           <div>
             <h3>Hotkey mode</h3>
-            <p>Choose how Voxly starts and stops recording from the global shortcut.</p>
+            <p>Choose how Dicta Fun starts and stops recording from the global shortcut.</p>
           </div>
           <div className="settings-mode-options" role="radiogroup" aria-label="Hotkey mode">
             {hotkeyModeOptions.map((option) => {
@@ -612,17 +616,19 @@ function SettingsPage({
         <div className="settings-row">
           <div>
             <h3>Permissions</h3>
-            <p>Microphone and accessibility access required for dictation.</p>
+            <p>Microphone{runtime.platform === "darwin" ? " and accessibility" : ""} access required for dictation.</p>
           </div>
           <div className="settings-row__actions">
             <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
               <Mic size={16} />
               Microphone…
             </TextButton>
-            <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-              <ShieldAlert size={16} />
-              Accessibility…
-            </TextButton>
+            {runtime.platform === "darwin" && (
+              <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+                <ShieldAlert size={16} />
+                Accessibility…
+              </TextButton>
+            )}
           </div>
         </div>
       </div>
@@ -641,28 +647,28 @@ const onboardingSteps: Array<{
     id: "welcome",
     eyebrow: "Setup",
     title: "Make dictation feel native.",
-    summary: "Voxly stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
+    summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
     icon: Sparkles,
   },
   {
     id: "permissions",
     eyebrow: "Access",
     title: "Grant only what dictation needs.",
-    summary: "Microphone access captures speech. Accessibility lets Voxly paste the result back at the cursor.",
+    summary: "Microphone access captures speech. On macOS, Accessibility lets Dicta Fun paste the result back at the cursor.",
     icon: LockKeyhole,
   },
   {
     id: "test",
     eyebrow: "Try It",
     title: "Speak and see it typed.",
-    summary: "Record a short clip — Voxly will transcribe it here so you know your microphone and model are working before you start.",
+    summary: "Record a short clip — Dicta Fun will transcribe it here so you know your microphone and model are working before you start.",
     icon: Mic,
   },
   {
     id: "finish",
     eyebrow: "Ready",
     title: "Try it from anywhere.",
-    summary: "Open the overlay, press your shortcut, speak, and Voxly will paste the transcript where your cursor is focused.",
+    summary: "Open the overlay, press your shortcut, speak, and Dicta Fun will paste the transcript where your cursor is focused.",
     icon: MousePointerClick,
   },
 ];
@@ -768,7 +774,7 @@ function OnboardingFlow({
               {isLast ? (
                 <>
                   <Check size={17} />
-                  Start Using Voxly
+                  Start Using Dicta Fun
                 </>
               ) : (
                 <>
@@ -839,17 +845,19 @@ function PermissionsStep({
           Open Settings...
         </TextButton>
       </SetupRow>
-      <SetupRow
-        icon={ShieldAlert}
-        title="Accessibility"
-        detail="Required on macOS for reliable paste-at-cursor behavior."
-        status={runtime.accessibility}
-        ok={accessibilityOk}
-      >
-        <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-          Open Settings...
-        </TextButton>
-      </SetupRow>
+      {runtime.platform === "darwin" && (
+        <SetupRow
+          icon={ShieldAlert}
+          title="Accessibility"
+          detail="Required on macOS for reliable paste-at-cursor behavior."
+          status={runtime.accessibility}
+          ok={accessibilityOk}
+        >
+          <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+            Open Settings...
+          </TextButton>
+        </SetupRow>
+      )}
       <TextButton variant="quiet" onClick={() => void onRefresh()}>
         <RefreshCw size={17} />
         Refresh Status

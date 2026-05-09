@@ -1,16 +1,22 @@
 {
-  "name": "voxly-electron",
+  "name": "dicta-fun-electron",
   "version": "0.1.0",
-  "description": "Voxly desktop dictation overlay",
+  "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
   "main": "out/main/main.js",
   "scripts": {
-    "postinstall": "node scripts/patch-electron-bundle.js",
+    "postinstall": "node scripts/patch-electron-bundle.js && husky install",
+    "prepare": "husky install",
     "dev": "node scripts/run-electron-vite.cjs dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "node scripts/run-electron-vite.cjs preview",
     "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac",
+    "dist:win": "npm run prebuild:win && npm run build && electron-builder --win",
+    "prebuild:mac": "echo 'macOS build: binaries already present'",
+    "prebuild:win": "node scripts/download-nircmd.js",
+    "download:nircmd": "node scripts/download-nircmd.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +27,8 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@commitlint/cli": "^19.6.1",
+    "@commitlint/config-conventional": "^19.6.0",
     "@types/node": "^22.16.5",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
@@ -28,12 +36,14 @@
     "electron": "^39.2.6",
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.0",
+    "husky": "^9.1.7",
+    "semantic-release": "^24.2.0",
     "typescript": "^5.8.3",
     "vite": "^7.3.1"
   },
   "build": {
-    "appId": "com.voxly.desktop",
-    "productName": "Voxly",
+    "appId": "com.dictafun.desktop",
+    "productName": "Dicta Fun",
     "files": [
       "out/**/*",
       "resources/**/*"
@@ -50,10 +60,11 @@
       "entitlements": "resources/entitlements.mac.plist",
       "entitlementsInherit": "resources/entitlements.mac.plist",
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "Voxly uses the microphone to transcribe your speech."
+        "NSMicrophoneUsageDescription": "Dicta Fun uses the microphone to transcribe your speech."
       }
     },
     "win": {
+      "icon": "resources/icon.ico",
       "target": "nsis"
     },
     "linux": {

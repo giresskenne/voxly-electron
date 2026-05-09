@@ -20,6 +20,19 @@ let pushKeyDownAt = 0;
 let pushKeyIsRecording = false;
 let pushLastStopAt = 0;
 
+const ALLOWED_EXTERNAL_HOSTS = new Set(["dictafun.com", "www.dictafun.com"]);
+
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    return ALLOWED_EXTERNAL_HOSTS.has(host) || host.endsWith(".dictafun.com");
+  } catch {
+    return false;
+  }
+}
+
 export function registerIpc(): void {
   log.info("Registering IPC handlers");
 
@@ -162,10 +175,27 @@ export function registerIpc(): void {
     return shell.openExternal(urls[kind]);
   });
 
-    ipcMain.handle("app:open-url", (_, url: string) => {
-      log.debug("IPC app:open-url", { url });
-      return shell.openExternal(url);
-    });
+  ipcMain.handle("app:open-web-route", (_, route: "pricing" | "signup" | "signin" | "privacy" | "terms") => {
+    const routes = {
+      pricing: "https://dictafun.com/pricing",
+      signup: "https://dictafun.com/signup",
+      signin: "https://dictafun.com/signin",
+      privacy: "https://dictafun.com/privacy",
+      terms: "https://dictafun.com/terms",
+    } as const;
+    const url = routes[route];
+    log.debug("IPC app:open-web-route", { route, url });
+    return shell.openExternal(url);
+  });
+
+  ipcMain.handle("app:open-url", (_, url: string) => {
+    if (!isAllowedExternalUrl(url)) {
+      log.warn("IPC app:open-url blocked", { url });
+      throw new Error("Blocked external URL");
+    }
+    log.debug("IPC app:open-url", { url });
+    return shell.openExternal(url);
+  });
 
   ipcMain.handle("runtime:status", () => {
     const status = getRuntimeStatus();
@@ -205,7 +235,7 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
   if (settings.mockTranscription) {
     log.debug("Returning mock transcription", { transcriptionMode: settings.transcriptionMode });
     await new Promise((resolve) => setTimeout(resolve, 650));
-    return "Voxly captured this dictation and is ready to paste it anywhere you are working.";
+    return "Dicta Fun captured this dictation and is ready to paste it anywhere you are working.";
   }
 
   if (settings.transcriptionMode === "cloud") {

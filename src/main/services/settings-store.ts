@@ -13,7 +13,7 @@ const defaults: AppSettings = {
   transcriptionMode: "local",
   selectedModel: "base",
   language: "en",
-  customDictionary: ["Voxly", "Whisper", "Electron", "TypeScript"],
+  customDictionary: ["Dicta Fun", "Whisper", "Electron", "TypeScript"],
   cleanupEnabled: true,
   agentName: "Nova",
   groqApiKey: "",

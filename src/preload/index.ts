@@ -24,7 +24,9 @@ const api = {
   openPanel: () => invoke<void>("panel:open"),
   openPermissionSettings: (kind: "microphone" | "accessibility" | "sound-input") =>
     invoke<void>("permissions:open", kind),
-    openURL: (url: string) => invoke<void>("app:open-url", url),
+  openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms") =>
+    invoke<void>("app:open-web-route", route),
+  openURL: (url: string) => invoke<void>("app:open-url", url),
   getRuntimeStatus: () => invoke<RuntimeStatus>("runtime:status"),
   log: (entry: { level: string; message: string; meta?: unknown; scope?: string; source?: string }) =>
     invoke<void>("log:write", entry),
@@ -84,6 +86,11 @@ const api = {
     const listener = () => callback();
     ipcRenderer.on("transcription:saved", listener);
     return () => ipcRenderer.removeListener("transcription:saved", listener);
+  },
+  onDeepLink: (callback: (url: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, url: string) => callback(url);
+    ipcRenderer.on("app:deep-link", listener);
+    return () => ipcRenderer.removeListener("app:deep-link", listener);
   },
 };
 

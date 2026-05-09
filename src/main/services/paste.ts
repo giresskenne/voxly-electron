@@ -59,16 +59,19 @@ async function invokeNativePaste(): Promise<PasteResult> {
         ok: false,
         fallback: true,
         message:
-          "Accessibility permission required. Please allow Voxly (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
+          "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
       };
     }
   }
 
   if (!binary) {
-    log.warn("No native paste binary for this platform; falling back to clipboard-only paste");
+    log.warn("No native paste binary for this platform; trying fallbacks");
     if (process.platform === "darwin") {
       await pasteMacOsWithOsascript();
       return { ok: true, fallback: true };
+    }
+    if (process.platform === "win32") {
+      return pasteWindowsWithNircmdOrPowerShell();
     }
     return {
       ok: true,
@@ -86,6 +89,10 @@ async function invokeNativePaste(): Promise<PasteResult> {
       log.warn("Paste binary failed; falling back to osascript", error);
       await pasteMacOsWithOsascript();
       return { ok: true, fallback: true };
+    }
+    if (process.platform === "win32") {
+      log.warn("Windows fast-paste binary failed; falling back to nircmd/PowerShell", error);
+      return pasteWindowsWithNircmdOrPowerShell();
     }
     throw error;
   }
@@ -137,6 +144,62 @@ function resolvePasteBinary(): string | null {
   return null;
 }
 
+function resolveNircmdBinary(): string | null {
+  if (process.platform !== "win32") return null;
+  const candidates = new Set<string>([
+    path.join(app.getAppPath(), "resources", "bin", "nircmd.exe"),
+    path.join(__dirname, "../../../resources/bin", "nircmd.exe"),
+  ]);
+  if (process.resourcesPath) {
+    candidates.add(path.join(process.resourcesPath, "bin", "nircmd.exe"));
+    candidates.add(path.join(process.resourcesPath, "app.asar.unpacked", "resources", "bin", "nircmd.exe"));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (statSync(candidate).isFile()) {
+        log.debug("Resolved nircmd.exe", { candidate });
+        return candidate;
+      }
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+async function pasteWindowsWithNircmdOrPowerShell(): Promise<PasteResult> {
+  const nircmd = resolveNircmdBinary();
+  if (nircmd) {
+    log.debug("Trying nircmd.exe paste");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        setTimeout(() => {
+          const child = spawn(nircmd, ["sendkeypress", "ctrl+v"], { windowsHide: true });
+          waitForPasteProcess(child, 2000).then(resolve).catch(reject);
+        }, PASTE_DELAYS.win32);
+      });
+      return { ok: true, fallback: true };
+    } catch (error) {
+      log.warn("nircmd.exe paste failed; falling back to PowerShell", error);
+    }
+  }
+  log.debug("Trying PowerShell paste");
+  await new Promise<void>((resolve, reject) => {
+    setTimeout(() => {
+      const child = spawn("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');[System.Windows.Forms.SendKeys]::SendWait('^v')",
+      ], { windowsHide: true });
+      waitForPasteProcess(child, 5000).then(resolve).catch(reject);
+    }, PASTE_DELAYS.win32);
+  });
+  return { ok: true, fallback: true };
+}
+
 function runPasteBinary(binary: string): Promise<void> {
   return new Promise((resolve, reject) => {
     setTimeout(() => {
@@ -186,7 +249,7 @@ function waitForPasteProcess(child: ChildProcess, timeoutMs: number): Promise<vo
         systemPreferences.isTrustedAccessibilityClient(true);
         reject(
           new Error(
-            "Accessibility permission required. Please allow Voxly (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
+            "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
           ),
         );
         return;

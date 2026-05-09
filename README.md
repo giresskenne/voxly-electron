@@ -48,6 +48,33 @@ npm run dev
 ```bash
 npm run dev      # dev mode with electron-vite hot reload
 npm run lint     # tsc --noEmit — must be clean before committing
+npm run dist:mac # build for macOS
+npm run dist:win # build for Windows
+```
+
+## Versioning & Releases
+
+This project uses **semantic-release** with GitHub Actions for automatic versioning on every merge.
+
+**Branches:**
+- `main` — Production releases (automatic version bump + GitHub release)
+- `feature/*` (and `feat/*`, `fix/*`, `chore/*`, `hotfix/*`) — Pre-releases on push
+
+**Commit Convention:**  
+All commits must follow [Conventional Commits](https://www.conventionalcommits.org/):
+```bash
+git commit -m "feat(paste): add Windows nircmd fallback"
+git commit -m "fix(overlay): resolve stacking issue"
+git commit -m "docs: update README"
+```
+
+Valid types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `revert`
+
+**Validation:** Husky pre-commit hooks enforce this locally. For full details, see [VERSIONING.md](./VERSIONING.md).
+
+## Scripts
+
+```bash
 npm run build    # type-check + production build
 npm run dist     # build + package with electron-builder
 ```
