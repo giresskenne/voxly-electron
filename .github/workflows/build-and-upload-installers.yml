@@ -3,6 +3,12 @@ name: Build And Upload Installers
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to build and publish installers for
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -10,15 +16,18 @@ permissions:
 env:
   R2_ENDPOINT: https://a0422396247c7b5ae116f931733ac7c8.r2.cloudflarestorage.com
   R2_BUCKET: dictafun-artifactory
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
 jobs:
   build-macos:
     name: Build macOS DMG
-    if: github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -111,11 +120,13 @@ jobs:
 
   build-windows:
     name: Build Windows EXE
-    if: github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -176,7 +187,7 @@ jobs:
 
   publish-assets:
     name: Publish To Release And R2
-    if: github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-latest
     needs: [build-macos, build-windows]
     steps:
@@ -200,7 +211,7 @@ jobs:
       - name: Attach installers to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.release.tag_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: |
             upload-assets/*.dmg
             upload-assets/*.exe
@@ -236,11 +247,16 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_REGION: auto
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          tag="${{ github.event.release.tag_name }}"
+          tag="${RELEASE_TAG}"
           version="${tag#v}"
+          released_at="$(gh release view "$tag" --json publishedAt --jq '.publishedAt' 2>/dev/null || true)"
+          if [[ -z "$released_at" || "$released_at" == "null" ]]; then
+            released_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          fi
           files_json='[]'
 
           for file in upload-assets/*; do
@@ -270,7 +286,7 @@ jobs:
           jq -n \
             --arg tag "$tag" \
             --arg version "$version" \
-            --arg releasedAt "${{ github.event.release.published_at }}" \
+            --arg releasedAt "$released_at" \
             --arg bucket "$R2_BUCKET" \
             --arg endpoint "$R2_ENDPOINT" \
             --argjson files "$files_json" \

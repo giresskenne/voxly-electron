@@ -6,6 +6,7 @@ on:
       - main
 
 permissions:
+  actions: write
   contents: write
   issues: write
   pull-requests: write
@@ -33,6 +34,7 @@ jobs:
         run: npm run build
 
       - name: Release
+        id: semantic
         uses: cycjimmy/semantic-release-action@v4
         with:
           semantic_version: 24.2.0
@@ -42,3 +44,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HUSKY: 0
+
+      - name: Build and publish installers
+        if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v${{ steps.semantic.outputs.new_release_version }}
+        run: |
+          gh workflow run build-and-upload-installers.yml \
+            --ref main \
+            --field tag="$RELEASE_TAG"
