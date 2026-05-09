@@ -7,7 +7,7 @@ Press a global hotkey → speak → release → transcribed text is pasted at th
 
 - Transparent always-on-top overlay with a liquid glass circular mic button
 - Local transcription via whisper.cpp (privacy-first, offline, no API key needed)
-- Cloud transcription via Groq (whisper-large-v3-turbo) or OpenAI Whisper
+- Cloud transcription via the authenticated Dicta Fun backend
 - Optional AI cleanup pass (punctuation, casing, filler-word removal)
 - Push-to-talk and tap-to-talk modes
 - Global hotkey registration (macOS, Windows, Linux)
@@ -28,20 +28,21 @@ Press a global hotkey → speak → release → transcribed text is pasted at th
 # 1. Install dependencies
 npm install
 
-# 2. Copy environment file and fill in optional API keys
+# 2. Copy environment file and set the backend URL
 cp .env.example .env
 
 # 3. Start in dev mode (hot reload)
 npm run dev
 ```
 
-### Environment variables (all optional)
+### Environment variables
 
 | Variable | Purpose |
 |---|---|
-| `GROQ_API_KEY` | Enable cloud transcription via Groq |
-| `OPENAI_API_KEY` | Enable AI cleanup / cloud Whisper via OpenAI |
+| `VITE_API_URL` | Backend API base URL for auth, billing, cloud transcription, and cleanup |
 | `VOXLY_DEBUG` | Set to `1` to enable verbose IPC logging |
+
+`GROQ_API_KEY` and `OPENAI_API_KEY` should live on the backend in production, not in the desktop app. The app calls authenticated backend endpoints for cloud transcription and cleanup.
 
 ## Scripts
 

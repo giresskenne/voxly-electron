@@ -11,8 +11,10 @@ import { entitlementService } from "./services/entitlements";
 import { windows } from "./window-manager";
 import { createMainLogger, ensureFileLogging } from "./debug-log";
 
-// Load project-root .env so OPENAI_API_KEY / GROQ_API_KEY are in process.env at runtime
+// Development reads the ignored project .env. Packaged CI builds include
+// resources/runtime.env with non-secret runtime config such as VITE_API_URL.
 loadDotenv({ path: path.join(__dirname, "../../.env") });
+loadDotenv({ path: path.join(__dirname, "../../resources/runtime.env"), override: true });
 
 const log = createMainLogger("main");
 const DEEP_LINK_PROTOCOL = "dictafun";

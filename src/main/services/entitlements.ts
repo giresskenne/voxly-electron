@@ -1,5 +1,6 @@
 import { createMainLogger } from "../debug-log";
 import type { AppSettings, BillingPlan, BillingStatus, EntitlementStatus } from "../types";
+import { fetchBackend, getBackendSessionToken, resolveBackendBaseUrl } from "./backend-api";
 import { credentialStore } from "./credential-store";
 
 const log = createMainLogger("entitlements");
@@ -10,11 +11,6 @@ const PLAN_CAPABILITIES: Record<BillingPlan, { cloud: boolean; cleanup: boolean 
   starter: { cloud: true, cleanup: true },
   pro: { cloud: true, cleanup: true },
 };
-
-function resolveApiBaseUrl(): string {
-  const raw = process.env.VITE_API_URL ?? process.env.API_URL ?? process.env.AUTH_API_URL ?? "";
-  return raw.trim().replace(/\/+$/, "");
-}
 
 function parsePlan(value: unknown): BillingPlan {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -87,25 +83,20 @@ export class EntitlementService {
       }
     }
 
-    const apiBase = resolveApiBaseUrl();
-    if (!apiBase) {
+    if (!resolveBackendBaseUrl()) {
       this.cache = makeDefault("missing-api-url");
       return this.cache;
     }
 
-    const token = await credentialStore.get("sessionToken");
+    const token = await getBackendSessionToken();
     if (!token) {
       this.cache = makeDefault("missing-session-token");
       return this.cache;
     }
 
     try {
-      const response = await fetch(`${apiBase}/auth/me`, {
+      const response = await fetchBackend("/auth/me", {
         method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${token}`,
-        },
       });
 
       if (!response.ok) {

@@ -123,6 +123,62 @@ Content-Type: application/json
 
 Electron app opens `checkoutUrl` in browser or Paddle checkout embed. After user completes payment, Paddle redirects to `PADDLE_CHECKOUT_URL` (default: `https://dictafun.com/checkout`) with `sessionId` param. Backend receives webhook and updates profile billing fields.
 
+### Cloud transcription
+
+```http
+POST /ai/transcriptions
+Authorization: Bearer <supabase-access-token>
+Content-Type: multipart/form-data
+```
+
+Multipart fields:
+
+| Field | Description |
+|---|---|
+| `file` | Audio file blob from Electron, currently WebM |
+| `provider` | `groq` |
+| `model` | `whisper-large-v3-turbo` |
+| `language` | User-selected transcription language |
+| `prompt` | Optional custom dictionary prompt |
+
+**Response:**
+
+```json
+{
+  "text": "Transcribed text"
+}
+```
+
+Backend owns `GROQ_API_KEY` and forwards this request to Groq. The desktop app must not receive or package the Groq key.
+
+### AI cleanup
+
+```http
+POST /ai/cleanup
+Authorization: Bearer <supabase-access-token>
+Content-Type: application/json
+
+{
+  "text": "raw dictated text",
+  "method": "cleanup",
+  "agentName": "Nova",
+  "instruction": null
+}
+```
+
+`method` is `cleanup` or `agent`. When `method` is `agent`, `instruction` contains the extracted instruction after the assistant name.
+
+**Response:**
+
+```json
+{
+  "text": "Cleaned text",
+  "method": "cleanup"
+}
+```
+
+Backend owns `OPENAI_API_KEY` and calls OpenAI for this cleanup step. The desktop app must not receive or package the OpenAI key.
+
 ### Get Paddle client config
 
 ```http
