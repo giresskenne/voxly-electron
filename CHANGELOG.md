@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.0...v1.0.1) (2026-05-09)
+
+
+### Bug Fixes
+
+* **build:** package whisper server binary ([f2652f5](https://github.com/giresskenne/voxly-electron/commit/f2652f52beab79dcfcb6b28e4f3a1b20e82e694e))
+
 # 1.0.0 (2026-05-09)
 
 
