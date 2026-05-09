@@ -30,7 +30,7 @@ jobs:
         run: npm ci
 
       - name: Prepare Apple Signing Certificate
-        if: secrets.CSC_LINK != '' && secrets.CSC_KEY_PASSWORD != ''
+        if: ${{ secrets.CSC_LINK != null && secrets.CSC_KEY_PASSWORD != null }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/certs"
@@ -40,7 +40,7 @@ jobs:
           echo "✓ Apple signing certificate loaded"
 
       - name: Prepare Apple Notarization API Key
-        if: secrets.APPLE_API_KEY != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER != ''
+        if: ${{ secrets.APPLE_API_KEY != null && secrets.APPLE_API_KEY_ID != null && secrets.APPLE_API_ISSUER != null }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/keys"
