@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.0.3",
+  "version": "1.0.4-fix-prod-accessibility-whisper.1",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
@@ -11,11 +11,13 @@
     "dev": "node scripts/run-electron-vite.cjs dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "node scripts/run-electron-vite.cjs preview",
+    "predist": "node scripts/download-whisper-model.js",
     "dist": "npm run build && electron-builder --publish never",
     "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac --publish never",
     "dist:win": "npm run prebuild:win && npm run build && electron-builder --win --publish never",
-    "prebuild:mac": "echo 'macOS build: binaries already present'",
-    "prebuild:win": "node scripts/download-nircmd.js",
+    "prebuild:mac": "node scripts/download-whisper-model.js",
+    "prebuild:win": "node scripts/download-whisper-model.js && node scripts/download-nircmd.js",
+    "download:whisper-model": "node scripts/download-whisper-model.js",
     "download:nircmd": "node scripts/download-nircmd.js",
     "lint": "tsc --noEmit"
   },

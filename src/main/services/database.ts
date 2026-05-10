@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { TranscriptionRecord } from "../types";
 import { createMainLogger } from "../debug-log";
+import { MOCK_TRANSCRIPTION_TEXT } from "./mock-transcription";
 
 const log = createMainLogger("database");
 
@@ -20,6 +21,7 @@ type SQLiteModule = {
   DatabaseSync: new (filePath: string) => DatabaseSync;
 };
 type SqliteRecord = Omit<TranscriptionRecord, "isProcessed"> & { isProcessed: 0 | 1 };
+const SQLITE_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 export class TranscriptionDatabase {
   private sqlitePath = path.join(app.getPath("userData"), "transcriptions.sqlite");
@@ -45,6 +47,7 @@ export class TranscriptionDatabase {
           error TEXT
         );
       `);
+      this.purgeGeneratedMockRows();
       log.info("SQLite database ready");
       return;
     } catch (error) {
@@ -55,6 +58,8 @@ export class TranscriptionDatabase {
     try {
       log.debug("Reading fallback transcription history", { fallbackPath: this.fallbackPath });
       this.rows = JSON.parse(await readFile(this.fallbackPath, "utf8")) as TranscriptionRecord[];
+      this.rows = this.rows.filter((row) => !isGeneratedMockRow(row));
+      await this.persist();
       log.info("Fallback transcription history loaded", { count: this.rows.length });
     } catch (error) {
       log.warn("Fallback history missing or unreadable; creating a new file", error);
@@ -81,14 +86,19 @@ export class TranscriptionDatabase {
         LIMIT ?
       `).all(limit) as SqliteRecord[];
 
-      const mapped = rows.map((row) => ({ ...row, isProcessed: Boolean(row.isProcessed) }));
+      const mapped = rows.map((row) => ({
+        ...row,
+        timestamp: normalizeTimestamp(row.timestamp),
+        isProcessed: Boolean(row.isProcessed),
+      }));
       log.debug("SQLite history returned", { count: mapped.length });
       return mapped;
     }
 
     const rows = [...this.rows]
       .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
-      .slice(0, limit);
+      .slice(0, limit)
+      .map((row) => ({ ...row, timestamp: normalizeTimestamp(row.timestamp) }));
     log.debug("JSON history returned", { count: rows.length });
     return rows;
   }
@@ -128,6 +138,7 @@ export class TranscriptionDatabase {
     if (this.db) {
       const statement = this.db.prepare(`
         INSERT INTO transcriptions (
+          timestamp,
           original_text,
           processed_text,
           is_processed,
@@ -135,7 +146,7 @@ export class TranscriptionDatabase {
           agent_name,
           error
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         RETURNING
           id,
           timestamp,
@@ -147,6 +158,7 @@ export class TranscriptionDatabase {
           error
       `);
       const row = statement.get(
+        new Date().toISOString(),
         record.originalText,
         record.processedText,
         record.isProcessed ? 1 : 0,
@@ -155,7 +167,11 @@ export class TranscriptionDatabase {
         record.error,
       ) as SqliteRecord;
 
-      const saved = { ...row, isProcessed: Boolean(row.isProcessed) };
+      const saved = {
+        ...row,
+        timestamp: normalizeTimestamp(row.timestamp),
+        isProcessed: Boolean(row.isProcessed),
+      };
       log.info("SQLite transcription record saved", { id: saved.id });
       return saved;
     }
@@ -179,6 +195,30 @@ export class TranscriptionDatabase {
     log.debug("Persisting fallback transcription history", { fallbackPath: this.fallbackPath, count: this.rows.length });
     await writeFile(this.fallbackPath, JSON.stringify(this.rows, null, 2));
   }
+
+  private purgeGeneratedMockRows(): void {
+    if (!this.db) return;
+    const result = this.db.prepare(`
+      DELETE FROM transcriptions
+      WHERE original_text = ?
+        AND (processed_text IS NULL OR processed_text = ?)
+    `).run(MOCK_TRANSCRIPTION_TEXT, MOCK_TRANSCRIPTION_TEXT);
+    log.info("Purged generated mock transcription rows", result);
+  }
 }
 
 export const transcriptionDatabase = new TranscriptionDatabase();
+
+function normalizeTimestamp(timestamp: string): string {
+  if (SQLITE_TIMESTAMP_PATTERN.test(timestamp)) {
+    return `${timestamp.replace(" ", "T")}Z`;
+  }
+  return timestamp;
+}
+
+function isGeneratedMockRow(row: TranscriptionRecord): boolean {
+  return (
+    row.originalText === MOCK_TRANSCRIPTION_TEXT &&
+    (row.processedText === null || row.processedText === MOCK_TRANSCRIPTION_TEXT)
+  );
+}

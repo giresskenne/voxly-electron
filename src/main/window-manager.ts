@@ -187,6 +187,11 @@ export class WindowManager {
     return this.settings;
   }
 
+  isSettingsVisible(): boolean {
+    if (!this.settings || this.settings.isDestroyed()) return false;
+    return this.settings.isVisible() && !this.settings.isMinimized();
+  }
+
   sendDictationToggle(): void {
     log.debug("Sending dictation toggle to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
     this.showDictationPanel();

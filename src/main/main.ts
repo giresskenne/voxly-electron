@@ -103,10 +103,9 @@ app.whenReady().then(async () => {
     const trusted = systemPreferences.isTrustedAccessibilityClient(false);
     log.info("Accessibility trusted", { trusted });
     if (!trusted) {
-      // Prompt=true opens the System Preferences dialog for the user to grant access.
-      // In dev mode the entry shows as "Electron"; in a packaged build it shows as "Dicta Fun".
-      systemPreferences.isTrustedAccessibilityClient(true);
-      log.info("Opened Accessibility permission prompt");
+      log.warn("Accessibility is not trusted; waiting for explicit user action before opening settings", {
+        execPath: process.execPath,
+      });
     }
   }
 

@@ -1,8 +1,9 @@
-import { app, clipboard, systemPreferences, type NativeImage } from "electron";
+import { app, clipboard, type NativeImage } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
-import { accessSync, chmodSync, constants, statSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { createMainLogger } from "../debug-log";
+import type { PasteAttention, PasteResult } from "../types";
 
 const log = createMainLogger("paste");
 
@@ -18,8 +19,6 @@ const RESTORE_DELAYS = {
   linux: 200,
 };
 
-type PasteResult = { ok: boolean; fallback: boolean; message?: string };
-
 type ClipboardSnapshot =
   | { type: "image"; data: NativeImage }
   | { type: "html"; text: string; html: string }
@@ -34,14 +33,18 @@ export async function pasteText(text: string): Promise<PasteResult> {
   try {
     const result = await invokeNativePaste();
     log.info("Native paste result", result);
-    setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    if (result.ok) {
+      setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    }
     return result;
   } catch (error) {
     log.error("Native paste failed", error);
+    const fallbackMessage = error instanceof Error ? error.message : "Native paste failed. Text is on the clipboard.";
     return {
       ok: false,
       fallback: true,
-      message: error instanceof Error ? error.message : "Native paste failed. Text is on the clipboard.",
+      message: fallbackMessage,
+      attention: inferPasteAttention(error),
     };
   }
 }
@@ -49,20 +52,6 @@ export async function pasteText(text: string): Promise<PasteResult> {
 async function invokeNativePaste(): Promise<PasteResult> {
   const binary = resolvePasteBinary();
   log.debug("Resolved paste binary", { binary });
-
-  if (process.platform === "darwin") {
-    const trusted = systemPreferences.isTrustedAccessibilityClient(false);
-    if (!trusted) {
-      log.warn("Paste requested without Accessibility trust");
-      systemPreferences.isTrustedAccessibilityClient(true);
-      return {
-        ok: false,
-        fallback: true,
-        message:
-          "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
-      };
-    }
-  }
 
   if (!binary) {
     log.warn("No native paste binary for this platform; trying fallbacks");
@@ -243,12 +232,7 @@ function waitForPasteProcess(child: ChildProcess, timeoutMs: number): Promise<vo
         return;
       }
       if (code === 2 && process.platform === "darwin") {
-        systemPreferences.isTrustedAccessibilityClient(true);
-        reject(
-          new Error(
-            "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
-          ),
-        );
+        reject(new Error(accessibilityRequiredMessage()));
         return;
       }
       reject(new Error(`Paste failed${code === null ? "" : ` with code ${code}`}${stderr ? `: ${stderr.trim()}` : ""}. Text is on the clipboard.`));
@@ -309,4 +293,43 @@ function restoreDelay(): number {
   if (process.platform === "darwin") return RESTORE_DELAYS.darwin;
   if (process.platform === "win32") return RESTORE_DELAYS.win32;
   return RESTORE_DELAYS.linux;
+}
+
+function accessibilityRequiredMessage(): string {
+  if (process.platform === "darwin" && isLikelyRunningFromDiskImage()) {
+    const applicationsPath = path.join("/Applications", `${app.getName()}.app`);
+    if (existsSync(applicationsPath)) {
+      return `Text copied to the clipboard, but this copy of ${app.getName()} is running from a disk image or quarantined download. Quit this copy, launch ${applicationsPath}, then toggle Accessibility off and on for ${app.getName()}.`;
+    }
+    return `Text copied to the clipboard, but ${app.getName()} is running from a disk image. Move ${app.getName()} to /Applications, quit this copy, launch it from /Applications, then toggle Accessibility off and on for ${app.getName()}.`;
+  }
+  return `Text copied to the clipboard, but Accessibility permission is required to paste at the cursor. Allow ${app.getName()} in System Settings -> Privacy & Security -> Accessibility, then try again.`;
+}
+
+function isLikelyRunningFromDiskImage(): boolean {
+  const executablePath = process.execPath;
+  return executablePath.includes("/AppTranslocation/") || executablePath.startsWith("/Volumes/");
+}
+
+function inferPasteAttention(error: unknown): PasteAttention | undefined {
+  if (!(error instanceof Error) || process.platform !== "darwin") return undefined;
+
+  const lowered = error.message.toLowerCase();
+  if (!lowered.includes("accessibility")) return undefined;
+
+  if (isLikelyRunningFromDiskImage()) {
+    return {
+      kind: "launch-from-applications",
+      summary: `Launch ${app.getName()} from /Applications.`,
+      detail: `${app.getName()} copied the text, but this translocated or quarantined copy cannot paste automatically. Quit this copy and launch ${app.getName()} from /Applications.`,
+      notificationBody: `${app.getName()} copied the text, but needs to run from /Applications to paste automatically.`,
+    };
+  }
+
+  return {
+    kind: "accessibility",
+    summary: "Accessibility needs to be re-enabled for this app.",
+    detail: `${app.getName()} copied your text to the clipboard, but macOS blocked automatic paste. Re-enable Accessibility for ${app.getName()} and refresh status.`,
+    notificationBody: `${app.getName()} copied the text, but needs Accessibility to paste automatically.`,
+  };
 }

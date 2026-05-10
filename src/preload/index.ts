@@ -6,6 +6,7 @@ import type {
   CheckoutSession,
   DesktopUpdateStatus,
   EntitlementStatus,
+  PasteResult,
   PaidPlan,
   RuntimeStatus,
   TranscriptionRecord,
@@ -27,8 +28,7 @@ const api = {
   getWordCountThisWeek: () => invoke<{ wordsUsed: number; wordsLimit: number }>("history:word-count-this-week"),
   transcribeLocalWhisper: (buffer: ArrayBuffer, options?: Partial<AppSettings>, chunks?: AudioChunk[]) =>
     invoke<TranscribeResult>("transcribe:local-whisper", buffer, options, chunks),
-  pasteText: (text: string) =>
-    invoke<{ ok: boolean; fallback: boolean; message?: string }>("paste:text", text),
+  pasteText: (text: string) => invoke<PasteResult>("paste:text", text),
   setOverlayInteractive: (interactive: boolean) => invoke<void>("overlay:set-interactive", interactive),
   startWindowDrag: () => invoke<void>("window:start-drag"),
   stopWindowDrag: () => invoke<void>("window:stop-drag"),
@@ -38,6 +38,7 @@ const api = {
   openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms") =>
     invoke<void>("app:open-web-route", route),
   openURL: (url: string) => invoke<void>("app:open-url", url),
+  openApplicationsFolder: () => invoke<void>("app:open-applications-folder"),
   getAppVersion: () => invoke<string>("app:version"),
   checkForUpdates: (force?: boolean) => invoke<DesktopUpdateStatus>("app:update-check", force),
   openUpdateDownload: () => invoke<void>("app:update-open"),

@@ -390,6 +390,14 @@ export function SettingsApp() {
           onCheck={() => void checkForUpdates(true)}
           onDownload={() => void openUpdateDownload()}
         />
+        {runtime.pasteAttention && (activeSection === "home" || activeSection === "settings") && (
+          <NeedsAttentionBanner
+            runtime={runtime}
+            onRefreshStatus={() => {
+              void window.electronAPI.getRuntimeStatus().then(setRuntime);
+            }}
+          />
+        )}
         {activeSection === "home" && (
           <HomePage history={history} settings={settings} />
         )}
@@ -417,6 +425,46 @@ export function SettingsApp() {
         )}
       </section>
     </main>
+  );
+}
+
+function NeedsAttentionBanner({
+  runtime,
+  onRefreshStatus,
+}: {
+  runtime: RuntimeStatus;
+  onRefreshStatus: () => void;
+}) {
+  if (!runtime.pasteAttention) return null;
+
+  const isAccessibilityIssue = runtime.pasteAttention.kind === "accessibility";
+
+  return (
+    <div className="needs-attention-banner glass-panel-subtle" role="status" aria-live="polite">
+      <div className="needs-attention-banner__icon">
+        <ShieldAlert size={18} />
+      </div>
+      <div className="needs-attention-banner__copy">
+        <strong>Needs attention</strong>
+        <p>{runtime.pasteAttention.summary}</p>
+        <p className="needs-attention-banner__detail">{runtime.pasteAttention.detail}</p>
+      </div>
+      <div className="needs-attention-banner__actions">
+        {isAccessibilityIssue ? (
+          <TextButton variant="glass" onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+            Open Accessibility
+          </TextButton>
+        ) : (
+          <TextButton variant="glass" onClick={() => window.electronAPI.openApplicationsFolder()}>
+            Open /Applications
+          </TextButton>
+        )}
+        <TextButton variant="quiet" onClick={onRefreshStatus}>
+          <RefreshCw size={15} />
+          Refresh Status
+        </TextButton>
+      </div>
+    </div>
   );
 }
 
@@ -1530,7 +1578,7 @@ function whisperStatusLabel(status: RuntimeStatus["whisper"]): string {
     case "ready": return "Ready";
     case "starting": return "Starting up…";
     case "mock": return "Demo mode";
-    case "missing": return "Model not downloaded — dictation will use cloud";
+    case "missing": return "Local model unavailable";
     case "error": return "Error loading model";
     case "disabled": return "Disabled";
     default: return String(status);

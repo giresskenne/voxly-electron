@@ -205,6 +205,12 @@ button:disabled {
   line-height: 1.5;
 }
 
+.preview-panel__actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-start;
+}
+
 /* ── Overlay anchor: positions the floating button bottom-right ── */
 .overlay-anchor {
   display: flex;
@@ -1514,6 +1520,57 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.needs-attention-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 36px 0;
+  max-width: 860px;
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+}
+
+.needs-attention-banner__icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--warning);
+  background: var(--glass-bg-subtle);
+}
+
+.needs-attention-banner__copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.needs-attention-banner__copy strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.needs-attention-banner__copy p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.needs-attention-banner__detail {
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+.needs-attention-banner__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .voxly-section-header {
   margin-bottom: 16px;
 }
@@ -2171,7 +2228,17 @@ button:disabled {
     margin: 16px 16px 0;
   }
 
+  .needs-attention-banner {
+    grid-template-columns: auto minmax(0, 1fr);
+    margin: 12px 16px 0;
+  }
+
   .app-update-banner__actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .needs-attention-banner__actions {
     grid-column: 1 / -1;
     justify-content: flex-start;
   }

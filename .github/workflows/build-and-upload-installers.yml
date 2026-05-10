@@ -9,6 +9,14 @@ on:
         description: Git tag to build and publish installers for
         required: true
         type: string
+      channel:
+        description: Update channel to publish
+        required: false
+        default: stable
+        type: choice
+        options:
+          - stable
+          - prerelease
 
 permissions:
   contents: write
@@ -17,6 +25,7 @@ env:
   R2_ENDPOINT: https://a0422396247c7b5ae116f931733ac7c8.r2.cloudflarestorage.com
   R2_BUCKET: dictafun-artifactory
   RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  RELEASE_CHANNEL: ${{ inputs.channel || (github.event.release.prerelease && 'prerelease') || 'stable' }}
 
 jobs:
   build-macos:
@@ -42,21 +51,33 @@ jobs:
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
           VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
+          VITE_DESKTOP_PRERELEASE_UPDATES_URL: ${{ vars.VITE_DESKTOP_PRERELEASE_UPDATES_URL || secrets.VITE_DESKTOP_PRERELEASE_UPDATES_URL }}
           VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
         run: |
           set -euo pipefail
+          updates_url="${VITE_DESKTOP_UPDATES_URL:-}"
+          if [[ "${RELEASE_CHANNEL}" == "prerelease" ]]; then
+            updates_url="${VITE_DESKTOP_PRERELEASE_UPDATES_URL:-}"
+            if [[ -z "$updates_url" && -n "${VITE_DESKTOP_UPDATES_URL:-}" ]]; then
+              updates_url="${VITE_DESKTOP_UPDATES_URL/desktop\/latest\/latest.json/desktop\/prerelease\/latest.json}"
+              if [[ "$updates_url" == "$VITE_DESKTOP_UPDATES_URL" ]]; then
+                updates_url=""
+              fi
+            fi
+          fi
+
           if [[ -z "${VITE_API_URL:-}" ]]; then
             echo "Missing GitHub Actions variable: VITE_API_URL"
             exit 1
           fi
-          if [[ -z "${VITE_DESKTOP_UPDATES_URL:-}" ]]; then
+          if [[ -z "$updates_url" ]]; then
             echo "Missing GitHub Actions variable: VITE_DESKTOP_UPDATES_URL"
             exit 1
           fi
 
           {
             printf 'VITE_API_URL=%s\n' "$VITE_API_URL"
-            printf 'VITE_DESKTOP_UPDATES_URL=%s\n' "$VITE_DESKTOP_UPDATES_URL"
+            printf 'VITE_DESKTOP_UPDATES_URL=%s\n' "$updates_url"
             if [[ -n "${VITE_DESKTOP_DOWNLOAD_BASE_URL:-}" ]]; then
               printf 'VITE_DESKTOP_DOWNLOAD_BASE_URL=%s\n' "$VITE_DESKTOP_DOWNLOAD_BASE_URL"
             fi
@@ -67,11 +88,12 @@ jobs:
         env:
           CERTIFICATE_LINK: ${{ secrets.CSC_LINK }}
           CERTIFICATE_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CERTIFICATE_NAME: ${{ secrets.CSC_NAME }}
         run: |
           set -euo pipefail
           if [[ -z "${CERTIFICATE_LINK:-}" || -z "${CERTIFICATE_PASSWORD:-}" ]]; then
-            echo "Skipping Apple signing certificate; CSC_LINK and CSC_KEY_PASSWORD are not both configured"
-            exit 0
+            echo "Missing GitHub secrets: CSC_LINK and CSC_KEY_PASSWORD are required for macOS release signing"
+            exit 1
           fi
 
           mkdir -p "$HOME/certs"
@@ -80,6 +102,9 @@ jobs:
           fi
           echo "CSC_LINK=$HOME/certs/certs.p12" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          if [[ -n "${CERTIFICATE_NAME:-}" ]]; then
+            echo "CSC_NAME=$CERTIFICATE_NAME" >> "$GITHUB_ENV"
+          fi
           echo "Apple signing certificate loaded"
 
       - name: Prepare Apple Notarization API Key
@@ -90,15 +115,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${APPLE_API_KEY_B64:-}" || -z "${APPLE_API_KEY_ID_VALUE:-}" || -z "${APPLE_API_ISSUER_VALUE:-}" ]]; then
-            echo "Skipping Apple notarization API key; APPLE_API_KEY, APPLE_API_KEY_ID, and APPLE_API_ISSUER are not all configured"
-            exit 0
+            echo "Missing GitHub secrets: APPLE_API_KEY, APPLE_API_KEY_ID, and APPLE_API_ISSUER are required for macOS notarization"
+            exit 1
           fi
 
           mkdir -p "$HOME/keys"
           if ! printf '%s' "$APPLE_API_KEY_B64" | base64 --decode > "$HOME/keys/AuthKey.p8" 2>/dev/null; then
             printf '%s' "$APPLE_API_KEY_B64" | base64 -D > "$HOME/keys/AuthKey.p8"
           fi
-          echo "APPLE_API_KEY_PATH=$HOME/keys/AuthKey.p8" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$HOME/keys/AuthKey.p8" >> "$GITHUB_ENV"
           echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID_VALUE" >> "$GITHUB_ENV"
           echo "APPLE_API_ISSUER=$APPLE_API_ISSUER_VALUE" >> "$GITHUB_ENV"
           echo "Apple notarization API key loaded"
@@ -152,24 +177,36 @@ jobs:
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
           VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
+          VITE_DESKTOP_PRERELEASE_UPDATES_URL: ${{ vars.VITE_DESKTOP_PRERELEASE_UPDATES_URL || secrets.VITE_DESKTOP_PRERELEASE_UPDATES_URL }}
           VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
         run: |
+          $updatesUrl = $env:VITE_DESKTOP_UPDATES_URL
+          if ($env:RELEASE_CHANNEL -eq "prerelease") {
+            $updatesUrl = $env:VITE_DESKTOP_PRERELEASE_UPDATES_URL
+            if ([string]::IsNullOrWhiteSpace($updatesUrl) -and -not [string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_UPDATES_URL)) {
+              $updatesUrl = $env:VITE_DESKTOP_UPDATES_URL.Replace("desktop/latest/latest.json", "desktop/prerelease/latest.json")
+              if ($updatesUrl -eq $env:VITE_DESKTOP_UPDATES_URL) {
+                $updatesUrl = ""
+              }
+            }
+          }
+
           if ([string]::IsNullOrWhiteSpace($env:VITE_API_URL)) {
             throw "Missing GitHub Actions variable: VITE_API_URL"
           }
-          if ([string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_UPDATES_URL)) {
+          if ([string]::IsNullOrWhiteSpace($updatesUrl)) {
             throw "Missing GitHub Actions variable: VITE_DESKTOP_UPDATES_URL"
           }
 
           $runtimeEnv = @(
             "VITE_API_URL=$env:VITE_API_URL",
-            "VITE_DESKTOP_UPDATES_URL=$env:VITE_DESKTOP_UPDATES_URL",
+            "VITE_DESKTOP_UPDATES_URL=$updatesUrl",
             "VOXLY_DEBUG=0"
           )
           if (-not [string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_DOWNLOAD_BASE_URL)) {
             $runtimeEnv = @(
               "VITE_API_URL=$env:VITE_API_URL",
-              "VITE_DESKTOP_UPDATES_URL=$env:VITE_DESKTOP_UPDATES_URL",
+              "VITE_DESKTOP_UPDATES_URL=$updatesUrl",
               "VITE_DESKTOP_DOWNLOAD_BASE_URL=$env:VITE_DESKTOP_DOWNLOAD_BASE_URL",
               "VOXLY_DEBUG=0"
             )
@@ -279,6 +316,15 @@ jobs:
 
           tag="${RELEASE_TAG}"
           version="${tag#v}"
+          channel="${RELEASE_CHANNEL}"
+          latest_prefix="desktop/latest"
+          manifest_key="desktop/latest/latest.json"
+          alias_suffix="latest"
+          if [[ "$channel" == "prerelease" ]]; then
+            latest_prefix="desktop/prerelease/latest"
+            manifest_key="desktop/prerelease/latest.json"
+            alias_suffix="prerelease"
+          fi
           released_at="$(gh release view "$tag" --json publishedAt --jq '.publishedAt' 2>/dev/null || true)"
           if [[ -z "$released_at" || "$released_at" == "null" ]]; then
             released_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -299,8 +345,8 @@ jobs:
             fi
 
             release_key="desktop/releases/${tag}/${base}"
-            latest_key="desktop/latest/${os}/${base}"
-            alias_key="desktop/latest/${os}/dictafun-${os}-latest.${ext}"
+            latest_key="${latest_prefix}/${os}/${base}"
+            alias_key="${latest_prefix}/${os}/dictafun-${os}-${alias_suffix}.${ext}"
 
             aws s3 cp "$file" "s3://${R2_BUCKET}/${release_key}" --endpoint-url "${R2_ENDPOINT}"
             aws s3 cp "$file" "s3://${R2_BUCKET}/${latest_key}" --endpoint-url "${R2_ENDPOINT}"
@@ -312,10 +358,11 @@ jobs:
           jq -n \
             --arg tag "$tag" \
             --arg version "$version" \
+            --arg channel "$channel" \
             --arg releasedAt "$released_at" \
             --arg bucket "$R2_BUCKET" \
             --arg endpoint "$R2_ENDPOINT" \
             --argjson files "$files_json" \
-            '{tag:$tag,version:$version,releasedAt:$releasedAt,bucket:$bucket,endpoint:$endpoint,files:$files}' > latest.json
+            '{tag:$tag,version:$version,channel:$channel,releasedAt:$releasedAt,bucket:$bucket,endpoint:$endpoint,files:$files}' > latest.json
 
-          aws s3 cp latest.json "s3://${R2_BUCKET}/desktop/latest/latest.json" --endpoint-url "${R2_ENDPOINT}"
+          aws s3 cp latest.json "s3://${R2_BUCKET}/${manifest_key}" --endpoint-url "${R2_ENDPOINT}"

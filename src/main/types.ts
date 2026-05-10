@@ -75,6 +75,21 @@ export type RuntimeStatus = {
   accessibility: "unknown" | "granted" | "denied";
   whisper: "disabled" | "mock" | "starting" | "ready" | "missing" | "error";
   hotkeyRegistered: boolean;
+  pasteAttention: PasteAttention | null;
+};
+
+export type PasteAttention = {
+  kind: "accessibility" | "launch-from-applications";
+  summary: string;
+  detail: string;
+  notificationBody: string;
+};
+
+export type PasteResult = {
+  ok: boolean;
+  fallback: boolean;
+  message?: string;
+  attention?: PasteAttention;
 };
 
 export type DesktopUpdateFile = {
