@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.0.4-fix-prod-accessibility-whisper.1",
+  "version": "1.0.4",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
