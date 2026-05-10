@@ -63,6 +63,21 @@ feat!: breaking change in API
   - ✅ Pre-release version (e.g., `v1.2.3-rc.1`)
   - ✅ GitHub Pre-Release published
   - ✅ Tagged as pre-release, not production
+  - ✅ RC installers built and uploaded to the prerelease update channel
+
+Pre-release installers use a separate desktop update manifest:
+
+```
+desktop/prerelease/latest.json
+```
+
+Production installers keep using:
+
+```
+desktop/latest/latest.json
+```
+
+Do not manually publish RC installers to the production `desktop/latest/` path. Production builds only check the production manifest, so RC builds can be tested without offering those updates to real users.
 
 ### 4. **Local Commit Validation**
 
@@ -109,7 +124,9 @@ git commit -m "feat: update dependencies."  # Period at end
 5. **Automatic pre-release created!**
    - Version bumped: e.g., `v0.2.0-rc.1`
    - GitHub Pre-Release published
-   - Can be used for testing/beta distribution
+   - RC installers attached to the GitHub Pre-Release
+   - RC installers uploaded to `desktop/prerelease/latest.json`
+   - Can be used for testing/beta distribution without updating production users
 
 ### For feature branch → `main` (Production release)
 
