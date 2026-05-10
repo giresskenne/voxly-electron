@@ -7,5 +7,11 @@ out/
 dist/
 release/
 *.log
+console:log
 resources/models/*.bin
 resources/runtime.env
+*.certSigningRequest
+*.cer
+*.p12
+AuthKey_*.p8
+*.p8

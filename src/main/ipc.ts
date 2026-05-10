@@ -1,5 +1,5 @@
-import { app, ipcMain, shell, systemPreferences } from "electron";
-import type { AppSettings, RuntimeStatus } from "./types";
+import { Notification, app, ipcMain, shell, systemPreferences } from "electron";
+import type { AppSettings, PasteAttention, RuntimeStatus } from "./types";
 import { settingsStore } from "./services/settings-store";
 import { transcriptionDatabase } from "./services/database";
 import { whisperService } from "./services/whisper";
@@ -23,6 +23,9 @@ const PUSH_STOP_COOLDOWN_MS = 300;
 let pushKeyDownAt = 0;
 let pushKeyIsRecording = false;
 let pushLastStopAt = 0;
+let pasteAttention: PasteAttention | null = null;
+let lastPasteAttentionNotificationAt = 0;
+const PASTE_ATTENTION_NOTIFICATION_COOLDOWN_MS = 10_000;
 
 const ALLOWED_EXTERNAL_HOSTS = new Set(["dictafun.com", "www.dictafun.com"]);
 
@@ -195,7 +198,23 @@ export function registerIpc(): void {
   ipcMain.handle("paste:text", async (_, text: string) => {
     log.info("IPC paste:text", { text });
     await windows.prepareOverlayForPaste();
-    return pasteText(text);
+    const result = await pasteText(text);
+
+    if (result.ok) {
+      if (pasteAttention) {
+        pasteAttention = null;
+        windows.sendRuntimeStatus(getRuntimeStatus());
+      }
+      return result;
+    }
+
+    if (result.attention) {
+      pasteAttention = result.attention;
+      windows.sendRuntimeStatus(getRuntimeStatus());
+      maybeNotifyPasteAttention(result.attention);
+    }
+
+    return result;
   });
 
   ipcMain.handle("overlay:set-interactive", (_, interactive: boolean) => {
@@ -223,6 +242,13 @@ export function registerIpc(): void {
 
   ipcMain.handle("permissions:open", (_, kind: "microphone" | "accessibility" | "sound-input") => {
     log.debug("IPC permissions:open", { kind });
+    if (process.platform === "darwin" && kind === "accessibility") {
+      const trusted = systemPreferences.isTrustedAccessibilityClient(true);
+      log.info("IPC permissions:open — requested Accessibility trust", {
+        trusted,
+        execPath: process.execPath,
+      });
+    }
     const urls = {
       microphone: process.platform === "win32"
         ? "ms-settings:privacy-microphone"
@@ -253,6 +279,11 @@ export function registerIpc(): void {
     }
     log.debug("IPC app:open-url", { url });
     return shell.openExternal(url);
+  });
+
+  ipcMain.handle("app:open-applications-folder", () => {
+    if (process.platform !== "darwin") return;
+    return shell.openPath("/Applications");
   });
 
   ipcMain.handle("app:version", () => app.getVersion());
@@ -313,6 +344,7 @@ export function registerInitialHotkey(): void {
 }
 
 export function getRuntimeStatus(): RuntimeStatus {
+  pasteAttention = resolvePasteAttention(pasteAttention);
   const status = {
     appVersion: app.getVersion(),
     platform: process.platform,
@@ -320,6 +352,7 @@ export function getRuntimeStatus(): RuntimeStatus {
     accessibility: getAccessibilityStatus(),
     whisper: whisperService.getStatus(),
     hotkeyRegistered,
+    pasteAttention,
   };
   log.debug("Runtime status computed", status);
   return status;
@@ -434,4 +467,36 @@ function getMicrophoneStatus(): RuntimeStatus["microphone"] {
 function getAccessibilityStatus(): RuntimeStatus["accessibility"] {
   if (process.platform !== "darwin") return "unknown";
   return systemPreferences.isTrustedAccessibilityClient(false) ? "granted" : "denied";
+}
+
+function resolvePasteAttention(current: PasteAttention | null): PasteAttention | null {
+  if (!current) return null;
+
+  if (current.kind === "accessibility" && getAccessibilityStatus() === "granted") {
+    return null;
+  }
+
+  return current;
+}
+
+function maybeNotifyPasteAttention(attention: PasteAttention): void {
+  if (process.platform !== "darwin") return;
+  if (windows.isSettingsVisible()) return;
+  if (!Notification.isSupported()) return;
+
+  const now = Date.now();
+  if (now - lastPasteAttentionNotificationAt < PASTE_ATTENTION_NOTIFICATION_COOLDOWN_MS) {
+    return;
+  }
+  lastPasteAttentionNotificationAt = now;
+
+  const notification = new Notification({
+    title: "Paste setup needed",
+    body: attention.notificationBody,
+    silent: false,
+  });
+  notification.on("click", () => {
+    windows.createSettings();
+  });
+  notification.show();
 }

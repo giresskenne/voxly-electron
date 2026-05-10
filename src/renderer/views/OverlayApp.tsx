@@ -1,7 +1,8 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Wand2, X } from "lucide-react";
+import { AlertTriangle, Wand2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppSettings, AudioChunk } from "../../main/types";
+import type { AppSettings, AudioChunk, PasteAttention } from "../../main/types";
+import { TextButton } from "../components/Controls";
 import { createRendererLogger } from "../lib/debug-log";
 
 type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
@@ -53,6 +54,7 @@ export function OverlayApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [preview, setPreview] = useState("");
   const [error, setError] = useState("");
+  const [pasteAttention, setPasteAttention] = useState<PasteAttention | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -70,6 +72,7 @@ export function OverlayApp() {
     setState("idle");
     setPreview("");
     setError("");
+    setPasteAttention(null);
   }, []);
 
   useEffect(() => {
@@ -139,6 +142,7 @@ export function OverlayApp() {
     try {
       log.info("Starting dictation");
       setError("");
+      setPasteAttention(null);
       setPreview("Listening...");
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -288,6 +292,17 @@ export function OverlayApp() {
       await window.electronAPI.setOverlayInteractive(false);
       const pasteResult = await window.electronAPI.pasteText(result.text);
       if (!pasteResult.ok) {
+        if (pasteResult.attention) {
+          setPasteAttention(pasteResult.attention);
+          setPreview("Copied to clipboard · Paste setup needed");
+          setError("");
+          setState("error");
+          resetTimerRef.current = window.setTimeout(() => {
+            log.debug("Resetting overlay after paste setup warning");
+            resetToIdle();
+          }, ERROR_RESET_MS);
+          return;
+        }
         throw new Error(pasteResult.message ?? "Text copied, but paste did not complete.");
       }
 
@@ -304,6 +319,7 @@ export function OverlayApp() {
         resetToIdle();
       }, COMPLETE_RESET_MS);
     } catch (err) {
+      setPasteAttention(null);
       setState("error");
       setError(err instanceof Error ? err.message : "Transcription failed.");
       log.error("Failed to finish dictation", err);
@@ -340,8 +356,16 @@ export function OverlayApp() {
               <span className="status-dot" data-state={state} />
               <span>{stateLabels[state]}</span>
               {state === "processing" && <Wand2 size={14} />}
+              {state === "error" && pasteAttention && <AlertTriangle size={14} />}
             </div>
             <p>{error || preview}</p>
+            {state === "error" && pasteAttention && (
+              <div className="preview-panel__actions">
+                <TextButton variant="quiet" onClick={() => window.electronAPI.openPanel()}>
+                  Open
+                </TextButton>
+              </div>
+            )}
           </motion.section>
         )}
       </AnimatePresence>
