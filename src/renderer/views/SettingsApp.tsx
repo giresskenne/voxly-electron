@@ -1530,7 +1530,7 @@ function whisperStatusLabel(status: RuntimeStatus["whisper"]): string {
     case "ready": return "Ready";
     case "starting": return "Starting up…";
     case "mock": return "Demo mode";
-    case "missing": return "Model not downloaded — dictation will use cloud";
+    case "missing": return "Local model unavailable";
     case "error": return "Error loading model";
     case "disabled": return "Disabled";
     default: return String(status);

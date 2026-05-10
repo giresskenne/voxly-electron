@@ -287,6 +287,9 @@ export function OverlayApp() {
 
       await window.electronAPI.setOverlayInteractive(false);
       const pasteResult = await window.electronAPI.pasteText(result.text);
+      if (!pasteResult.ok) {
+        throw new Error(pasteResult.message ?? "Text copied, but paste did not complete.");
+      }
 
       const t3 = performance.now();
       log.info("Paste complete", {

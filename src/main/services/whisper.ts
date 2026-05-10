@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AppSettings, RuntimeStatus } from "../types";
 import { createMainLogger } from "../debug-log";
+import { MOCK_TRANSCRIPTION_TEXT } from "./mock-transcription";
 
 const log = createMainLogger("whisper");
 
@@ -97,10 +98,15 @@ export class WhisperService {
       language: settings.language,
       dictionarySize: settings.customDictionary.length,
     });
-    if (settings.mockTranscription || this.status !== "ready") {
+    if (settings.mockTranscription) {
       log.debug("Returning mock transcription", { status: this.status });
       await new Promise((resolve) => setTimeout(resolve, 650));
-      return "This is a test transcription. Your actual speech will appear here once you start recording.";
+      return MOCK_TRANSCRIPTION_TEXT;
+    }
+
+    if (this.status !== "ready") {
+      log.warn("Local Whisper requested while unavailable", { status: this.status });
+      throw new Error(this.unavailableMessage());
     }
 
     const dir = path.join(os.tmpdir(), "voxly");
@@ -174,6 +180,16 @@ export class WhisperService {
     }
     log.debug("Resolved whisper model path", { model, candidate });
     return candidate;
+  }
+
+  private unavailableMessage(): string {
+    if (this.status === "missing") {
+      return "Local Whisper is missing its model or server binary. Rebuild the app with the Whisper assets included, or switch to cloud transcription.";
+    }
+    if (this.status === "error") {
+      return "Local Whisper failed to start. Check the desktop logs, then restart Dicta Fun.";
+    }
+    return "Local Whisper is still starting. Try again in a moment.";
   }
 
   private fileToBuffer(filePath: string): Promise<Buffer> {
