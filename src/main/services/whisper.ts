@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { createReadStream, existsSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readSync, statSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,15 @@ import { createMainLogger } from "../debug-log";
 import { MOCK_TRANSCRIPTION_TEXT } from "./mock-transcription";
 
 const log = createMainLogger("whisper");
+const MIN_MODEL_BYTES = 100 * 1024 * 1024;
+const GGML_MODEL_MAGIC = Buffer.from([0x6c, 0x6d, 0x67, 0x67]);
+
+interface ModelValidation {
+  ok: boolean;
+  reason?: string;
+  size?: number;
+  magic?: string;
+}
 
 export class WhisperService {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -174,17 +183,40 @@ export class WhisperService {
     const candidate = app.isPackaged
       ? path.join(process.resourcesPath, "models", `ggml-${model}.bin`)
       : path.join(app.getAppPath(), "resources", "models", `ggml-${model}.bin`);
-    if (!existsSync(candidate)) {
-      log.warn("Whisper model not found", { model, candidate });
+    const validation = this.validateModel(candidate);
+    if (!validation.ok) {
+      log.warn("Whisper model is missing or invalid", { model, candidate, ...validation });
       return null;
     }
     log.debug("Resolved whisper model path", { model, candidate });
     return candidate;
   }
 
+  private validateModel(filePath: string): ModelValidation {
+    if (!existsSync(filePath)) return { ok: false, reason: "missing" };
+
+    const stats = statSync(filePath);
+    if (stats.size < MIN_MODEL_BYTES) {
+      return { ok: false, reason: "too small", size: stats.size };
+    }
+
+    const file = openSync(filePath, "r");
+    try {
+      const magic = Buffer.alloc(GGML_MODEL_MAGIC.length);
+      readSync(file, magic, 0, magic.length, 0);
+      if (!magic.equals(GGML_MODEL_MAGIC)) {
+        return { ok: false, reason: "bad magic", size: stats.size, magic: magic.toString("hex") };
+      }
+    } finally {
+      closeSync(file);
+    }
+
+    return { ok: true, size: stats.size };
+  }
+
   private unavailableMessage(): string {
     if (this.status === "missing") {
-      return "Local Whisper is missing its model or server binary. Rebuild the app with the Whisper assets included, or switch to cloud transcription.";
+      return "Local Whisper is missing or has a corrupt model/server binary. Rebuild the app with the Whisper assets included, or switch to cloud transcription.";
     }
     if (this.status === "error") {
       return "Local Whisper failed to start. Check the desktop logs, then restart Dicta Fun.";
