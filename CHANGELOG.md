@@ -1,3 +1,10 @@
+## [1.0.3-fix-prod-accessibility-whisper.3](https://github.com/giresskenne/voxly-electron/compare/v1.0.3-fix-prod-accessibility-whisper.2...v1.0.3-fix-prod-accessibility-whisper.3) (2026-05-10)
+
+
+### Bug Fixes
+
+* validate bundled whisper model before launch ([70b5950](https://github.com/giresskenne/voxly-electron/commit/70b59503f911a60b4d1be925974bcf3cd84a10f0))
+
 ## [1.0.3-fix-prod-accessibility-whisper.2](https://github.com/giresskenne/voxly-electron/compare/v1.0.3-fix-prod-accessibility-whisper.1...v1.0.3-fix-prod-accessibility-whisper.2) (2026-05-10)
 
 
