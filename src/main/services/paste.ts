@@ -34,7 +34,9 @@ export async function pasteText(text: string): Promise<PasteResult> {
   try {
     const result = await invokeNativePaste();
     log.info("Native paste result", result);
-    setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    if (result.ok) {
+      setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    }
     return result;
   } catch (error) {
     log.error("Native paste failed", error);
@@ -54,12 +56,10 @@ async function invokeNativePaste(): Promise<PasteResult> {
     const trusted = systemPreferences.isTrustedAccessibilityClient(false);
     if (!trusted) {
       log.warn("Paste requested without Accessibility trust");
-      systemPreferences.isTrustedAccessibilityClient(true);
       return {
         ok: false,
         fallback: true,
-        message:
-          "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
+        message: accessibilityRequiredMessage(),
       };
     }
   }
@@ -243,12 +243,7 @@ function waitForPasteProcess(child: ChildProcess, timeoutMs: number): Promise<vo
         return;
       }
       if (code === 2 && process.platform === "darwin") {
-        systemPreferences.isTrustedAccessibilityClient(true);
-        reject(
-          new Error(
-            "Accessibility permission required. Please allow Dicta Fun (or Electron in dev mode) in System Settings -> Privacy & Security -> Accessibility, then try again.",
-          ),
-        );
+        reject(new Error(accessibilityRequiredMessage()));
         return;
       }
       reject(new Error(`Paste failed${code === null ? "" : ` with code ${code}`}${stderr ? `: ${stderr.trim()}` : ""}. Text is on the clipboard.`));
@@ -309,4 +304,16 @@ function restoreDelay(): number {
   if (process.platform === "darwin") return RESTORE_DELAYS.darwin;
   if (process.platform === "win32") return RESTORE_DELAYS.win32;
   return RESTORE_DELAYS.linux;
+}
+
+function accessibilityRequiredMessage(): string {
+  if (process.platform === "darwin" && isLikelyRunningFromDiskImage()) {
+    return "Text copied to the clipboard, but Dicta Fun is running from a disk image. Move Dicta Fun to /Applications, quit this copy, launch it from /Applications, then toggle Accessibility off and on for Dicta Fun.";
+  }
+  return "Text copied to the clipboard, but Accessibility permission is required to paste at the cursor. Allow Dicta Fun in System Settings -> Privacy & Security -> Accessibility, then try again.";
+}
+
+function isLikelyRunningFromDiskImage(): boolean {
+  const executablePath = process.execPath;
+  return executablePath.includes("/AppTranslocation/") || executablePath.startsWith("/Volumes/");
 }

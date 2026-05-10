@@ -14,6 +14,7 @@ import type { AudioChunk } from "./types";
 import { entitlementService } from "./services/entitlements";
 import { billingService } from "./services/billing";
 import { updateChecker } from "./services/update-checker";
+import { MOCK_TRANSCRIPTION_TEXT } from "./services/mock-transcription";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
@@ -172,9 +173,9 @@ export function registerIpc(): void {
     const row = await transcriptionDatabase.save({
       originalText,
       processedText: cleanup.text,
-      isProcessed: settings.cleanupEnabled,
+      isProcessed: cleanup.method !== "none",
       processingMethod: cleanup.method,
-      agentName: settings.cleanupEnabled ? settings.agentName : null,
+      agentName: cleanup.method === "agent" ? settings.agentName : null,
       error: null,
     });
     const dbMs = Date.now() - t2;
@@ -328,7 +329,7 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
   if (settings.mockTranscription) {
     log.debug("Returning mock transcription", { transcriptionMode: settings.transcriptionMode });
     await new Promise((resolve) => setTimeout(resolve, 650));
-    return "This is a test transcription. Your actual speech will appear here once you start recording.";
+    return MOCK_TRANSCRIPTION_TEXT;
   }
 
   if (settings.transcriptionMode === "cloud") {
