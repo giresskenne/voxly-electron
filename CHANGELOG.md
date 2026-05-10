@@ -1,3 +1,11 @@
+## [1.0.3-fix-prod-accessibility-whisper.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.2...v1.0.3-fix-prod-accessibility-whisper.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* enable cleanup for free users ([8a181f9](https://github.com/giresskenne/voxly-electron/commit/8a181f982418f29f28876dc42667b479434e7b9f))
+* updated the CI ([a908043](https://github.com/giresskenne/voxly-electron/commit/a908043c39d85858e84d80b2592164ed260b0e13))
+
 ## [1.0.2](https://github.com/giresskenne/voxly-electron/compare/v1.0.1...v1.0.2) (2026-05-09)
 
 

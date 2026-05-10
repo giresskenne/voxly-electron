@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.0.2",
+  "version": "1.0.3-fix-prod-accessibility-whisper.1",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
@@ -52,8 +52,14 @@
       "!resources/models/**"
     ],
     "extraResources": [
-      { "from": "resources/bin", "to": "bin" },
-      { "from": "resources/models", "to": "models" }
+      {
+        "from": "resources/bin",
+        "to": "bin"
+      },
+      {
+        "from": "resources/models",
+        "to": "models"
+      }
     ],
     "mac": {
       "icon": "resources/icon.icns",
