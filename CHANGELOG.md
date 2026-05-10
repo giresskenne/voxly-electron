@@ -1,3 +1,10 @@
+## [1.0.3-fix-prod-accessibility-whisper.2](https://github.com/giresskenne/voxly-electron/compare/v1.0.3-fix-prod-accessibility-whisper.1...v1.0.3-fix-prod-accessibility-whisper.2) (2026-05-10)
+
+
+### Bug Fixes
+
+* **desktop:** repair prod whisper and accessibility ([3233fbf](https://github.com/giresskenne/voxly-electron/commit/3233fbffce6dcee2eb22db8abbc962d4d6ced388))
+
 ## [1.0.3-fix-prod-accessibility-whisper.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.2...v1.0.3-fix-prod-accessibility-whisper.1) (2026-05-10)
 
 
