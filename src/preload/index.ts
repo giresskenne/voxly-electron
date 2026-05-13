@@ -6,10 +6,13 @@ import type {
   CheckoutSession,
   DesktopUpdateStatus,
   EntitlementStatus,
+  LangMismatch,
   PasteResult,
   PaidPlan,
+  ReferralStatus,
   RuntimeStatus,
   TranscriptionRecord,
+  WeeklyUsageStatus,
 } from "../main/types";
 import { createPreloadLogger } from "./debug-log";
 
@@ -19,37 +22,54 @@ type TranscribeResult = {
   text: string;
   originalText: string;
   record: TranscriptionRecord | null;
+  langMismatch: LangMismatch | null;
+};
+type TranscribeOptions = Partial<AppSettings> & {
+  saveToHistory?: boolean;
 };
 
 const api = {
   getSettings: () => invoke<AppSettings>("settings:get"),
   updateSettings: (patch: Partial<AppSettings>) => invoke<AppSettings>("settings:update", patch),
   listHistory: (limit?: number) => invoke<TranscriptionRecord[]>("history:list", limit),
-  getWordCountThisWeek: () => invoke<{ wordsUsed: number; wordsLimit: number }>("history:word-count-this-week"),
-  transcribeLocalWhisper: (buffer: ArrayBuffer, options?: Partial<AppSettings>, chunks?: AudioChunk[]) =>
+  getWordCountThisWeek: () => invoke<WeeklyUsageStatus>("history:word-count-this-week"),
+  transcribeLocalWhisper: (buffer: ArrayBuffer, options?: TranscribeOptions, chunks?: AudioChunk[]) =>
     invoke<TranscribeResult>("transcribe:local-whisper", buffer, options, chunks),
   pasteText: (text: string) => invoke<PasteResult>("paste:text", text),
+  replaceLastPastedText: (previousText: string, nextText: string) =>
+    invoke<PasteResult>("paste:replace-last", previousText, nextText),
+  translateText: (text: string, targetLang: string) =>
+    invoke<{ text: string }>("translate:text", text, targetLang),
   setOverlayInteractive: (interactive: boolean) => invoke<void>("overlay:set-interactive", interactive),
+  hideOverlayForHour: () => invoke<void>("overlay:hide-for-hour"),
   startWindowDrag: () => invoke<void>("window:start-drag"),
   stopWindowDrag: () => invoke<void>("window:stop-drag"),
   openPanel: () => invoke<void>("panel:open"),
+  openPanelTab: (tab: string) => invoke<void>("panel:open-tab", tab),
   openPermissionSettings: (kind: "microphone" | "accessibility" | "sound-input") =>
     invoke<void>("permissions:open", kind),
-  openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms") =>
+  openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms" | "help" | "feedback" | "referral") =>
     invoke<void>("app:open-web-route", route),
   openURL: (url: string) => invoke<void>("app:open-url", url),
   openApplicationsFolder: () => invoke<void>("app:open-applications-folder"),
   getAppVersion: () => invoke<string>("app:version"),
   checkForUpdates: (force?: boolean) => invoke<DesktopUpdateStatus>("app:update-check", force),
   openUpdateDownload: () => invoke<void>("app:update-open"),
-  setSessionToken: (token: string) => invoke<EntitlementStatus>("auth:set-session-token", token),
+  setSessionToken: (token: string, refreshToken?: string) => invoke<EntitlementStatus>("auth:set-session-token", token, refreshToken),
   clearSessionToken: () => invoke<EntitlementStatus>("auth:clear-session-token"),
+  hasSessionToken: () => invoke<boolean>("auth:has-session-token"),
   getEntitlementStatus: (force?: boolean) => invoke<EntitlementStatus>("entitlement:get", force),
   syncEntitlement: (force?: boolean) =>
     invoke<{ entitlements: EntitlementStatus; settings: AppSettings }>("entitlement:sync", force),
   startCheckout: (payload: { plan: PaidPlan; interval: BillingInterval }) =>
     invoke<CheckoutSession>("billing:start-checkout", payload),
+  getReferralLink: () => invoke<string>("referral:get-link"),
+  getReferralStatus: () => invoke<ReferralStatus>("referral:get-status"),
+  sendReferralInvite: (email: string) => invoke<void>("referral:send-invite", email),
+  applyReferralCode: (code: string) => invoke<void>("referral:apply-code", code),
+  sendFeedback: (message: string) => invoke<void>("app:send-feedback", message),
   getRuntimeStatus: () => invoke<RuntimeStatus>("runtime:status"),
+  setHotkeyTestCaptureActive: (active: boolean) => invoke<void>("onboarding:hotkey-test-capture", active),
   log: (entry: { level: string; message: string; meta?: unknown; scope?: string; source?: string }) =>
     invoke<void>("log:write", entry),
   getLogLevel: () => invoke<string>("log:get-level"),
@@ -113,6 +133,16 @@ const api = {
     const listener = (_: Electron.IpcRendererEvent, url: string) => callback(url);
     ipcRenderer.on("app:deep-link", listener);
     return () => ipcRenderer.removeListener("app:deep-link", listener);
+  },
+  onSessionExpired: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on("auth:session-expired", listener);
+    return () => ipcRenderer.removeListener("auth:session-expired", listener);
+  },
+  onSettingsNavigateTab: (callback: (tab: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, tab: string) => callback(tab);
+    ipcRenderer.on("settings:navigate-tab", listener);
+    return () => ipcRenderer.removeListener("settings:navigate-tab", listener);
   },
 };
 

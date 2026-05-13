@@ -4,6 +4,7 @@ import path from "node:path";
 import type { TranscriptionRecord } from "../types";
 import { createMainLogger } from "../debug-log";
 import { MOCK_TRANSCRIPTION_TEXT } from "./mock-transcription";
+import { countWords } from "./usage-policy";
 
 const log = createMainLogger("database");
 
@@ -103,27 +104,22 @@ export class TranscriptionDatabase {
     return rows;
   }
 
-  async wordCountThisWeek(): Promise<{ wordsUsed: number; wordsLimit: number }> {
-    const WEEKLY_LIMIT = 10_000;
+  async wordCountThisWeek(): Promise<number> {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     if (this.db) {
-      const row = this.db.prepare(`
-        SELECT COALESCE(SUM(
-          LENGTH(TRIM(original_text)) - LENGTH(REPLACE(TRIM(original_text), ' ', '')) +
-          CASE WHEN LENGTH(TRIM(original_text)) > 0 THEN 1 ELSE 0 END
-        ), 0) AS wordCount
+      const rows = this.db.prepare(`
+        SELECT original_text AS originalText
         FROM transcriptions
         WHERE datetime(timestamp) >= datetime(?)
-      `).get(sevenDaysAgo) as { wordCount: number };
-      return { wordsUsed: row.wordCount, wordsLimit: WEEKLY_LIMIT };
+      `).all(sevenDaysAgo) as Array<{ originalText: string }>;
+      return rows.reduce((sum, row) => sum + countWords(row.originalText), 0);
     }
 
     const sevenDaysAgoMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const wordsUsed = this.rows
+    return this.rows
       .filter((r) => Date.parse(r.timestamp) >= sevenDaysAgoMs)
-      .reduce((sum, r) => sum + r.originalText.trim().split(/\s+/).filter(Boolean).length, 0);
-    return { wordsUsed, wordsLimit: WEEKLY_LIMIT };
+      .reduce((sum, r) => sum + countWords(r.originalText), 0);
   }
 
   async save(record: NewRecord): Promise<TranscriptionRecord> {

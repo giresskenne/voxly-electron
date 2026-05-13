@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AppSettings } from "../types";
+import type { AppSettings, DisplayLanguage } from "../types";
 import { createMainLogger } from "../debug-log";
 import { credentialStore } from "./credential-store";
 
@@ -13,6 +13,7 @@ const defaults: AppSettings = {
   transcriptionMode: "local",
   selectedModel: "base",
   language: "en",
+  displayLanguage: "en",
   customDictionary: ["Dicta Fun", "Whisper", "Electron", "TypeScript"],
   cleanupEnabled: true,
   agentName: "Nova",
@@ -83,6 +84,9 @@ export class SettingsStore {
     const next = { ...settings };
     next.groqApiKey = "";
     next.openaiApiKey = "";
+    if (next.displayLanguage) {
+      next.displayLanguage = normalizeDisplayLanguage(next.displayLanguage);
+    }
     return next;
   }
 
@@ -100,6 +104,10 @@ export class SettingsStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await writeFile(this.filePath, JSON.stringify(this.cache, null, 2), { mode: 0o600 });
   }
+}
+
+function normalizeDisplayLanguage(language: string): DisplayLanguage {
+  return language === "fr-FR" ? "fr-FR" : "en";
 }
 
 export const settingsStore = new SettingsStore();

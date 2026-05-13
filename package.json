@@ -11,6 +11,7 @@
     "dev": "node scripts/run-electron-vite.cjs dev",
     "build": "tsc --noEmit && electron-vite build",
     "preview": "node scripts/run-electron-vite.cjs preview",
+    "test": "node -e \"require('node:fs').rmSync('.test-build',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test .test-build/tests/*.test.js",
     "predist": "node scripts/download-whisper-model.js",
     "dist": "npm run build && electron-builder --publish never",
     "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac --publish never",
