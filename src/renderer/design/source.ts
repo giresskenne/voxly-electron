@@ -13,7 +13,7 @@ import {
 
 export const brand = {
   name: "Dicta Fun",
-  tagline: "Voice-first AI writing assistant",
+  tagline: "Your AI voice assistant",
   gradient: "var(--gradient-brand)",
 };
 

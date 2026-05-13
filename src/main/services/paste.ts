@@ -19,10 +19,19 @@ const RESTORE_DELAYS = {
   linux: 200,
 };
 
+const REPLACE_PASTE_MAX_AGE_MS = 20_000;
+
 type ClipboardSnapshot =
   | { type: "image"; data: NativeImage }
   | { type: "html"; text: string; html: string }
   | { type: "text"; data: string };
+
+type LastPasteSnapshot = {
+  text: string;
+  pastedAt: number;
+};
+
+let lastSuccessfulPaste: LastPasteSnapshot | null = null;
 
 export async function pasteText(text: string): Promise<PasteResult> {
   log.info("Paste requested", { textLength: text.length });
@@ -34,12 +43,56 @@ export async function pasteText(text: string): Promise<PasteResult> {
     const result = await invokeNativePaste();
     log.info("Native paste result", result);
     if (result.ok) {
+      rememberSuccessfulPaste(text);
       setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
     }
     return result;
   } catch (error) {
     log.error("Native paste failed", error);
     const fallbackMessage = error instanceof Error ? error.message : "Native paste failed. Text is on the clipboard.";
+    return {
+      ok: false,
+      fallback: true,
+      message: fallbackMessage,
+      attention: inferPasteAttention(error),
+    };
+  }
+}
+
+export async function replaceLastPastedText(previousText: string, nextText: string): Promise<PasteResult> {
+  log.info("Replace last paste requested", {
+    previousTextLength: previousText.length,
+    nextTextLength: nextText.length,
+  });
+
+  if (!canReplaceLastPaste(previousText)) {
+    log.warn("Replace last paste skipped — recent paste context missing", {
+      hasLastPaste: Boolean(lastSuccessfulPaste),
+      lastPasteAgeMs: lastSuccessfulPaste ? Date.now() - lastSuccessfulPaste.pastedAt : null,
+      lastPasteMatches: lastSuccessfulPaste?.text === previousText,
+    });
+    return {
+      ok: false,
+      fallback: true,
+      message: "Couldn't safely replace the last pasted text. Try undo and then paste the translation manually.",
+    };
+  }
+
+  const previousClipboard = saveClipboard();
+  log.debug("Captured previous clipboard for replacement", clipboardSnapshotMeta(previousClipboard));
+  clipboard.writeText(nextText);
+
+  try {
+    const result = await invokeNativeReplace();
+    log.info("Replace last paste result", result);
+    if (result.ok) {
+      rememberSuccessfulPaste(nextText);
+      setTimeout(() => restoreClipboard(previousClipboard), restoreDelay());
+    }
+    return result;
+  } catch (error) {
+    log.error("Replace last paste failed", error);
+    const fallbackMessage = error instanceof Error ? error.message : "Replacement failed. Translation is on the clipboard.";
     return {
       ok: false,
       fallback: true,
@@ -85,6 +138,22 @@ async function invokeNativePaste(): Promise<PasteResult> {
     }
     throw error;
   }
+}
+
+async function invokeNativeReplace(): Promise<PasteResult> {
+  if (process.platform === "darwin") {
+    await replaceMacOsWithOsascript();
+    return { ok: true, fallback: true };
+  }
+  if (process.platform === "win32") {
+    await replaceWindowsWithPowerShell();
+    return { ok: true, fallback: true };
+  }
+  return {
+    ok: false,
+    fallback: true,
+    message: "Automatic translation replacement is not available on this platform.",
+  };
 }
 
 function resolvePasteBinary(): string | null {
@@ -207,6 +276,38 @@ function pasteMacOsWithOsascript(): Promise<void> {
   });
 }
 
+function replaceMacOsWithOsascript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const child = spawn("osascript", [
+        "-e",
+        'tell application "System Events" to keystroke "z" using command down',
+        "-e",
+        "delay 0.08",
+        "-e",
+        'tell application "System Events" to key code 9 using command down',
+      ]);
+      waitForPasteProcess(child, 3000).then(resolve).catch(reject);
+    }, PASTE_DELAYS.darwin);
+  });
+}
+
+function replaceWindowsWithPowerShell(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const child = spawn("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');[System.Windows.Forms.SendKeys]::SendWait('^z');Start-Sleep -Milliseconds 80;[System.Windows.Forms.SendKeys]::SendWait('^v')",
+      ], { windowsHide: true });
+      waitForPasteProcess(child, 5000).then(resolve).catch(reject);
+    }, PASTE_DELAYS.win32);
+  });
+}
+
 function waitForPasteProcess(child: ChildProcess, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     let stderr = "";
@@ -281,6 +382,19 @@ function clipboardSnapshotMeta(snapshot: ClipboardSnapshot): Record<string, unkn
     return { type: snapshot.type, previousTextLength: snapshot.text.length, previousHtmlLength: snapshot.html.length };
   }
   return { type: snapshot.type, previousTextLength: snapshot.data.length };
+}
+
+function rememberSuccessfulPaste(text: string): void {
+  lastSuccessfulPaste = {
+    text,
+    pastedAt: Date.now(),
+  };
+}
+
+function canReplaceLastPaste(previousText: string): boolean {
+  if (!lastSuccessfulPaste) return false;
+  if (lastSuccessfulPaste.text !== previousText) return false;
+  return Date.now() - lastSuccessfulPaste.pastedAt <= REPLACE_PASTE_MAX_AGE_MS;
 }
 
 function pasteDelay(): number {

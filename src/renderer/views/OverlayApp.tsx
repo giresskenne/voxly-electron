@@ -1,68 +1,348 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Wand2, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ClipboardPaste, Clock, Languages, Mic, ScrollText, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppSettings, AudioChunk, PasteAttention } from "../../main/types";
+import type { AppSettings, AudioChunk, LangMismatch, PasteAttention, WeeklyUsageStatus } from "../../main/types";
 import { TextButton } from "../components/Controls";
 import { createRendererLogger } from "../lib/debug-log";
+import { I18nProvider, useT } from "../lib/i18n";
 
 type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
 const log = createRendererLogger("overlay-ui");
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+/** localStorage key for the user's preferred microphone device ID. Empty string means auto-detect. */
+const PREF_MIC_KEY = "voxly:micDeviceId";
 
-// 3-bar wave icon shown in idle / hover states
-const SoundWaveIcon = ({ size = 16 }: { size?: number }) => (
-  <div className="sound-wave" style={{ height: size }} aria-hidden="true">
-    <div className="sound-wave__bar" style={{ height: size * 0.55 }} />
-    <div className="sound-wave__bar" style={{ height: size }} />
-    <div className="sound-wave__bar" style={{ height: size * 0.55 }} />
-  </div>
-);
-
-// 5 animated bars shown during active recording
-const RecordingWave = () => (
-  <div className="wave-bars-mic" aria-hidden="true">
-    {[0, 1, 2, 3, 4].map((i) => (
-      <span key={i} style={{ animationDelay: `${i * 90}ms` }} />
-    ))}
-  </div>
-);
-
-// 4 animated bars shown while transcription is processing
-const ProcessingWave = () => (
-  <div className="wave-bars-mic" aria-hidden="true">
-    {[0, 1, 2, 3].map((i) => (
-      <span key={i} style={{ animationDelay: `${i * 90}ms` }} />
-    ))}
-  </div>
-);
-
-const stateLabels: Record<DictationState, string> = {
-  idle: "Ready",
-  recording: "Listening",
-  processing: "Processing",
-  complete: "Pasted",
-  error: "Needs attention",
-};
 const CLOUD_CHUNK_MS = 240_000;
 const RECORDING_AUDIO_BITS_PER_SECOND = 128_000;
 const COMPLETE_RESET_MS = 1000;
-const ERROR_RESET_MS = 4000;
+/** RMS threshold (0–255) above which we treat the mic as having active voice. */
+const VOICE_RMS_THRESHOLD = 14;
+const VOICE_POLL_MS = 80;
+const AUTO_TRANSLATE_MISMATCH_PAIRS_KEY = "voxly:autoTranslateMismatchPairs";
+
+const LANG_DISPLAY_NAMES: Record<string, string> = {
+  en: "English", fr: "French", es: "Spanish", de: "German",
+  pt: "Portuguese", it: "Italian", ja: "Japanese", zh: "Chinese",
+  ko: "Korean", ru: "Russian", ar: "Arabic",
+};
+
+function mismatchPairKey(mismatch: LangMismatch): string {
+  return `${mismatch.detected}->${mismatch.configured}`;
+}
+
+function getAutoTranslateMismatchPairs(): Set<string> {
+  try {
+    const raw = localStorage.getItem(AUTO_TRANSLATE_MISMATCH_PAIRS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value): value is string => typeof value === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function setAutoTranslateMismatchPairs(next: Set<string>): void {
+  localStorage.setItem(AUTO_TRANSLATE_MISMATCH_PAIRS_KEY, JSON.stringify(Array.from(next)));
+}
+
+function shouldAutoTranslateMismatch(mismatch: LangMismatch): boolean {
+  return getAutoTranslateMismatchPairs().has(mismatchPairKey(mismatch));
+}
+
+function enableAutoTranslateMismatch(mismatch: LangMismatch): void {
+  const next = getAutoTranslateMismatchPairs();
+  next.add(mismatchPairKey(mismatch));
+  setAutoTranslateMismatchPairs(next);
+}
+
+function normalizeComparableText(text: string): string {
+  return text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// ─── Sound effects ─────────────────────────────────────────────────────────────
+
+function playTone(type: "start" | "stop"): void {
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const now = ctx.currentTime;
+    osc.type = "sine";
+    if (type === "start") {
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.linearRampToValueAtTime(840, now + 0.08);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.11);
+      osc.start(now);
+      osc.stop(now + 0.11);
+    } else {
+      osc.frequency.setValueAtTime(840, now);
+      osc.frequency.linearRampToValueAtTime(460, now + 0.09);
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0, now + 0.12);
+      osc.start(now);
+      osc.stop(now + 0.12);
+    }
+    osc.onended = () => void ctx.close();
+  } catch {
+    /* AudioContext not available — fail silently */
+  }
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+/** Three pulsing dots — shown when idle/hovered or when recording in silence. */
+const PillDots = () => (
+  <div className="pill-dots" aria-hidden="true">
+    {[0, 1, 2].map((i) => (
+      <span key={i} className="pill-dot" style={{ animationDelay: `${i * 200}ms` }} />
+    ))}
+  </div>
+);
+
+/** Five animated wave bars — shown when recording with detected voice. */
+const PillWave = () => (
+  <div className="pill-wave" aria-hidden="true">
+    {[0, 1, 2, 3, 4].map((i) => (
+      <span key={i} className="pill-wave__bar" style={{ animationDelay: `${i * 65}ms` }} />
+    ))}
+  </div>
+);
+
+/** Four slower wave bars — shown while processing. */
+const PillProcessing = () => (
+  <div className="pill-wave pill-wave--processing" aria-hidden="true">
+    {[0, 1, 2, 3].map((i) => (
+      <span key={i} className="pill-wave__bar" style={{ animationDelay: `${i * 140}ms` }} />
+    ))}
+  </div>
+);
+
+// ─── Pill context menu ────────────────────────────────────────────────────────
+
+/** Microphone device picker — expands inline below the Microphone row. */
+const MicrophoneSubmenu = () => {
+  const t = useT();
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedId, setSelectedId] = useState<string>(() => localStorage.getItem(PREF_MIC_KEY) ?? "");
+
+  useEffect(() => {
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((all) => setDevices(all.filter((d) => d.kind === "audioinput")))
+      .catch(() => {});
+  }, []);
+
+  const selectDevice = (id: string) => {
+    localStorage.setItem(PREF_MIC_KEY, id);
+    setSelectedId(id);
+  };
+
+  const inUseDevice = devices.find((d) => d.deviceId === selectedId);
+  const inUseLabel = inUseDevice?.label || t("overlay.menu.autoDetect");
+
+  return (
+    <motion.div
+      className="pill-mic-submenu"
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: "auto" }}
+      exit={{ opacity: 0, height: 0 }}
+      transition={{ duration: 0.15 }}
+      style={{ overflow: "hidden" }}
+    >
+      <button
+        type="button"
+        className="pill-menu__item"
+        onClick={() => selectDevice("")}
+      >
+        <span className="pill-menu__check">{selectedId === "" && <Check size={13} />}</span>
+        <span>{t("overlay.menu.autoDetect")}</span>
+      </button>
+
+      {devices
+        .filter((d) => d.deviceId !== "default" && d.deviceId !== "")
+        .map((d) => (
+          <button
+            key={d.deviceId}
+            type="button"
+            className="pill-menu__item"
+            onClick={() => selectDevice(d.deviceId)}
+          >
+            <span className="pill-menu__check">{d.deviceId === selectedId && <Check size={13} />}</span>
+            <span>{d.label || "Unknown device"}</span>
+          </button>
+        ))}
+
+      <div className="pill-mic-submenu__footer">
+        <span className="pill-mic-submenu__footer-label">{t("overlay.menu.micInUse")}</span>
+        <span>{inUseLabel}</span>
+      </div>
+    </motion.div>
+  );
+};
+
+type PillMenuProps = {
+  onClose: () => void;
+  onPasteLastTranscript: () => void;
+};
+
+const PillContextMenu = ({ onClose, onPasteLastTranscript }: PillMenuProps) => {
+  const t = useT();
+  const [micOpen, setMicOpen] = useState(false);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleClose = () => {
+    if (closeTimerRef.current !== null) return; // already scheduled
+    closeTimerRef.current = setTimeout(onClose, 350);
+  };
+  const cancelClose = () => {
+    if (closeTimerRef.current !== null) {
+      clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  };
+
+  // Close when clicking outside both panels
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".pill-menu") && !target?.closest(".pill-mic-submenu")) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="pill-menu-anchor" onMouseLeave={scheduleClose} onMouseEnter={cancelClose}>
+      <motion.div
+        className="pill-menu glass-panel-strong"
+        initial={{ opacity: 0, y: 8, scale: 0.96 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 8, scale: 0.96 }}
+        transition={{ duration: 0.14 }}
+      >
+      <button
+        type="button"
+        className="pill-menu__item"
+        onClick={() => {
+          void window.electronAPI.hideOverlayForHour();
+          onClose();
+        }}
+      >
+        <Clock size={15} />
+        <span>{t("overlay.menu.hideForHour")}</span>
+      </button>
+
+      <button
+        type="button"
+        className="pill-menu__item"
+        onClick={() => {
+          void window.electronAPI.openPanel();
+          onClose();
+        }}
+      >
+        <Settings size={15} />
+        <span>{t("overlay.menu.settings")}</span>
+      </button>
+
+      <div className="pill-menu__divider" />
+
+      {/* Microphone row — click toggles mic picker inline */}
+      <div className="pill-menu__item-group">
+        <button
+          type="button"
+          className="pill-menu__item pill-menu__item--has-sub"
+          aria-expanded={micOpen}
+          onClick={() => setMicOpen((v) => !v)}
+        >
+          <Mic size={15} />
+          <span>{t("overlay.menu.microphone")}</span>
+          <ChevronDown size={13} className="pill-menu__chevron" style={{ transform: micOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.15s" }} />
+        </button>
+
+        <AnimatePresence>
+          {micOpen && <MicrophoneSubmenu />}
+        </AnimatePresence>
+      </div>
+
+      <div className="pill-menu__divider" />
+
+      <button
+        type="button"
+        className="pill-menu__item"
+        onClick={() => {
+          void window.electronAPI.openPanel();
+          onClose();
+        }}
+      >
+        <ScrollText size={15} />
+        <span>{t("overlay.menu.transcriptHistory")}</span>
+      </button>
+
+      <button
+        type="button"
+        className="pill-menu__item"
+        onClick={() => {
+          onPasteLastTranscript();
+          onClose();
+        }}
+      >
+        <ClipboardPaste size={15} />
+        <span>{t("overlay.menu.pasteLastTranscript")}</span>
+      </button>
+      </motion.div>
+    </div>
+  );
+};
 
 export function OverlayApp() {
   const [state, setState] = useState<DictationState>("idle");
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [weeklyUsage, setWeeklyUsage] = useState<WeeklyUsageStatus | null>(null);
   const [preview, setPreview] = useState("");
   const [error, setError] = useState("");
+  const [usageLimitBlocked, setUsageLimitBlocked] = useState(false);
   const [pasteAttention, setPasteAttention] = useState<PasteAttention | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [langMismatch, setLangMismatch] = useState<LangMismatch | null>(null);
+  /** True when the analyser detects voice above the RMS threshold. */
+  const [hasVoice, setHasVoice] = useState(false);
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const resetTimerRef = useRef<number | null>(null);
   const startInFlightRef = useRef(false);
   const stopRequestedDuringStartRef = useRef(false);
+  /** Ref-tracked drag state so onClick handler always sees the latest value. */
+  const isDraggingRef = useRef(false);
+  const analyserCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const voicePollRef = useRef<number | null>(null);
+
+  /** Tear down the voice-level analyser completely. */
+  const cleanupVoiceDetector = useCallback(() => {
+    if (voicePollRef.current !== null) {
+      window.clearInterval(voicePollRef.current);
+      voicePollRef.current = null;
+    }
+    analyserRef.current = null;
+    if (analyserCtxRef.current) {
+      void analyserCtxRef.current.close();
+      analyserCtxRef.current = null;
+    }
+    setHasVoice(false);
+  }, []);
 
   const resetToIdle = useCallback(() => {
     if (resetTimerRef.current !== null) {
@@ -72,8 +352,92 @@ export function OverlayApp() {
     setState("idle");
     setPreview("");
     setError("");
+    setUsageLimitBlocked(false);
     setPasteAttention(null);
+    setLangMismatch(null);
   }, []);
+
+  /** Re-paste the most recent transcript without re-recording. */
+  const pasteLastTranscript = useCallback(async () => {
+    try {
+      const records = await window.electronAPI.listHistory(1);
+      const last = records[0];
+      const text = last?.processedText ?? last?.originalText ?? "";
+      if (!text.trim()) {
+        setState("error");
+        setError("No previous transcript found.");
+        return;
+      }
+      await window.electronAPI.setOverlayInteractive(false);
+      const result = await window.electronAPI.pasteText(text);
+      if (!result.ok) {
+        setState("error");
+        setError(result.message ?? "Paste failed — text is on your clipboard.");
+        if (result.attention) setPasteAttention(result.attention);
+      } else {
+        setState("complete");
+        resetTimerRef.current = window.setTimeout(resetToIdle, COMPLETE_RESET_MS);
+      }
+    } catch (err) {
+      setState("error");
+      setError(err instanceof Error ? err.message : "Paste failed.");
+    }
+  }, [resetToIdle]);
+
+  /** Translate the last pasted text and re-paste. */
+  const translateAndRepaste = useCallback(async (mismatch: LangMismatch, alwaysTranslate = false) => {
+    log.debug("Language mismatch prompt action", {
+      action: "translate",
+      detected: mismatch.detected,
+      configured: mismatch.configured,
+    });
+    if (resetTimerRef.current !== null) {
+      window.clearTimeout(resetTimerRef.current);
+      resetTimerRef.current = null;
+    }
+    if (alwaysTranslate) {
+      enableAutoTranslateMismatch(mismatch);
+    }
+    setLangMismatch(null);
+    setState("processing");
+    try {
+      const historyFallback = async () => {
+        const records = await window.electronAPI.listHistory(1);
+        return records[0]?.processedText ?? records[0]?.originalText ?? "";
+      };
+      const text = preview.trim() || await historyFallback();
+      if (!text.trim()) { resetToIdle(); return; }
+      const { text: translated } = await window.electronAPI.translateText(text, mismatch.configured);
+      if (
+        mismatch.detected !== mismatch.configured
+        && normalizeComparableText(translated) === normalizeComparableText(text)
+      ) {
+        throw new Error("Translation returned unchanged text.");
+      }
+      const pasteResult = await window.electronAPI.replaceLastPastedText(text, translated);
+      if (!pasteResult.ok) {
+        setState("error");
+        setError(pasteResult.message ?? "Paste failed.");
+        return;
+      }
+      setPreview(translated);
+      setState("complete");
+    } catch (err) {
+      setState("error");
+      setError(err instanceof Error ? err.message : "Translation failed.");
+      return;
+    }
+    resetTimerRef.current = window.setTimeout(resetToIdle, COMPLETE_RESET_MS);
+  }, [preview, resetToIdle]);
+
+  useEffect(() => {
+    if (langMismatch && state === "complete") {
+      log.debug("Language mismatch prompt shown", {
+        detected: langMismatch.detected,
+        configured: langMismatch.configured,
+      });
+    }
+  }, [langMismatch, state]);
 
   useEffect(() => {
     log.info("Overlay mounted");
@@ -81,6 +445,7 @@ export function OverlayApp() {
       log.debug("Overlay settings loaded", next);
       setSettings(next);
     });
+    window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
     const offToggle = window.electronAPI.onDictationToggle(() => {
       log.info("Received dictation toggle from main");
       void toggleDictationRef.current();
@@ -116,17 +481,16 @@ export function OverlayApp() {
     return () => document.removeEventListener("mouseup", stop);
   }, [isDragging]);
 
-  // Only force-interactive when actively recording/processing so the cancel button is reachable.
-  // When idle the overlay-anchor hover handlers take care of it; going back to idle clears it.
+  // Keep interactivity in sync with all overlay-visible states so hover cannot leave the window click-blocking.
   useEffect(() => {
-    if (state === "idle") {
+    if (state === "idle" && !menuOpen && !isHovered) {
       log.debug("Overlay returned to idle — releasing mouse capture");
       void window.electronAPI.setOverlayInteractive(false);
     } else {
-      log.debug("Overlay active state — capturing mouse", { state });
+      log.debug("Overlay active state — capturing mouse", { state, isHovered, menuOpen });
       void window.electronAPI.setOverlayInteractive(true);
     }
-  }, [state]);
+  }, [state, menuOpen, isHovered]);
 
   const startDictation = useCallback(async () => {
     if (startInFlightRef.current || recorderRef.current?.state === "recording") {
@@ -140,12 +504,26 @@ export function OverlayApp() {
       resetTimerRef.current = null;
     }
     try {
+      const usage = await window.electronAPI.getWordCountThisWeek();
+      setWeeklyUsage(usage);
+      if (usage.isLimited && usage.wordsRemaining !== null && usage.wordsRemaining <= 0) {
+        setState("error");
+        setPreview("");
+        setError("You've reached your free weekly word limit.");
+        setUsageLimitBlocked(true);
+        startInFlightRef.current = false;
+        return;
+      }
       log.info("Starting dictation");
       setError("");
+      setUsageLimitBlocked(false);
       setPasteAttention(null);
-      setPreview("Listening...");
+      setPreview("");
+      playTone("start");
+      const prefMicId = localStorage.getItem(PREF_MIC_KEY) ?? "";
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
+          ...(prefMicId ? { deviceId: { ideal: prefMicId } } : {}),
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -153,6 +531,27 @@ export function OverlayApp() {
       });
       streamRef.current = stream;
       chunksRef.current = [];
+
+      // Set up real-time voice-level detection for the dots↔waves visual switch.
+      cleanupVoiceDetector();
+      try {
+        const actx = new AudioContext();
+        analyserCtxRef.current = actx;
+        const analyser = actx.createAnalyser();
+        analyser.fftSize = 256;
+        actx.createMediaStreamSource(stream).connect(analyser);
+        analyserRef.current = analyser;
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        voicePollRef.current = window.setInterval(() => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(data);
+          const avg = data.reduce((sum, v) => sum + v, 0) / data.length;
+          setHasVoice(avg > VOICE_RMS_THRESHOLD);
+        }, VOICE_POLL_MS);
+      } catch {
+        log.debug("Voice level detection unavailable");
+      }
+
       const mimeType = preferredMimeType();
       log.debug("Media stream acquired", {
         mimeType,
@@ -184,15 +583,12 @@ export function OverlayApp() {
     } catch (err) {
       startInFlightRef.current = false;
       stopRequestedDuringStartRef.current = false;
+      cleanupVoiceDetector();
       setState("error");
       setError(err instanceof Error ? err.message : "Microphone access failed.");
       log.error("Failed to start dictation", err);
-      resetTimerRef.current = window.setTimeout(() => {
-        log.debug("Resetting overlay after mic error");
-        resetToIdle();
-      }, ERROR_RESET_MS);
     }
-  }, [resetToIdle]);
+  }, [resetToIdle, cleanupVoiceDetector]);
 
   const stopDictation = useCallback(() => {
     log.info("Stopping dictation", { recorderState: recorderRef.current?.state });
@@ -201,6 +597,7 @@ export function OverlayApp() {
       return;
     }
     if (recorderRef.current?.state === "recording") {
+      playTone("stop");
       recorderRef.current.stop();
     }
   }, []);
@@ -246,8 +643,9 @@ export function OverlayApp() {
 
   const finishDictation = useCallback(async () => {
     log.info("Finishing dictation", { chunkCount: chunksRef.current.length });
+    cleanupVoiceDetector();
     setState("processing");
-    setPreview("Cleaning up transcript...");
+    setPreview("");
     streamRef.current?.getTracks().forEach((track) => track.stop());
 
     try {
@@ -272,6 +670,7 @@ export function OverlayApp() {
       });
 
       const result = await window.electronAPI.transcribeLocalWhisper(arrayBuffer, settings ?? undefined, chunks);
+      window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
 
       const t2 = performance.now();
       log.info("Transcription IPC round-trip complete", {
@@ -289,18 +688,16 @@ export function OverlayApp() {
         return;
       }
 
+      let textToPaste = result.text;
+
       await window.electronAPI.setOverlayInteractive(false);
-      const pasteResult = await window.electronAPI.pasteText(result.text);
+      const pasteResult = await window.electronAPI.pasteText(textToPaste);
       if (!pasteResult.ok) {
         if (pasteResult.attention) {
           setPasteAttention(pasteResult.attention);
-          setPreview("Copied to clipboard · Paste setup needed");
-          setError("");
+          setPreview(result.text);
+          setError("Couldn't paste — text is on your clipboard");
           setState("error");
-          resetTimerRef.current = window.setTimeout(() => {
-            log.debug("Resetting overlay after paste setup warning");
-            resetToIdle();
-          }, ERROR_RESET_MS);
           return;
         }
         throw new Error(pasteResult.message ?? "Text copied, but paste did not complete.");
@@ -314,21 +711,27 @@ export function OverlayApp() {
       });
 
       setState("complete");
-      resetTimerRef.current = window.setTimeout(() => {
-        log.debug("Resetting overlay after completion");
-        resetToIdle();
-      }, COMPLETE_RESET_MS);
+      // If mismatch exists, keep prompt open until user acts (translate or keep).
+      if (result.langMismatch) {
+        setLangMismatch(result.langMismatch);
+      } else {
+        resetTimerRef.current = window.setTimeout(() => {
+          log.debug("Resetting overlay after completion");
+          resetToIdle();
+        }, COMPLETE_RESET_MS);
+      }
     } catch (err) {
       setPasteAttention(null);
       setState("error");
-      setError(err instanceof Error ? err.message : "Transcription failed.");
+      const raw = err instanceof Error ? err.message : "Transcription failed.";
+      // Strip the Electron IPC wrapper prefix if present
+      const ipcPrefix = "Error invoking remote method 'transcribe:local-whisper': Error: ";
+      const message = raw.startsWith(ipcPrefix) ? raw.slice(ipcPrefix.length) : raw;
+      setError(message);
+      setUsageLimitBlocked(message.toLowerCase().includes("word limit"));
       log.error("Failed to finish dictation", err);
-      resetTimerRef.current = window.setTimeout(() => {
-        log.debug("Resetting overlay after error");
-        resetToIdle();
-      }, ERROR_RESET_MS);
     }
-  }, [settings, resetToIdle]);
+  }, [settings, resetToIdle, cleanupVoiceDetector]);
 
   // Drives all visual changes — order matters: active states take priority over hover
   const micState = (() => {
@@ -340,108 +743,275 @@ export function OverlayApp() {
     return "idle" as const;
   })();
 
+  /** Pill dimensions driven by state + hover. */
+  const pillSize = (() => {
+    if (state === "recording") return { width: 220, height: 40 };
+    if (state === "processing") return { width: 180, height: 40 };
+    if (state === "complete") return { width: 130, height: 32 };
+    if (isHovered && state === "idle") return { width: 144, height: 32 };
+    return { width: 110, height: 8 }; // resting thin line
+  })();
+
+  /** Whether the pill is large enough to show inner content. */
+  const isPillExpanded =
+    state === "recording" ||
+    state === "processing" ||
+    state === "complete" ||
+    (state === "idle" && isHovered);
+
   return (
-    <main className="overlay-stage">
-      {/* Preview panel — animates in/out above the button whenever not idle */}
+    <I18nProvider language={settings?.displayLanguage ?? "en"}>
+      <main className="overlay-stage">
+      {/* ── Error panel — only appears on error ── */}
       <AnimatePresence>
-        {state !== "idle" && (
+        {state === "error" && (
           <motion.section
-            className="preview-panel glass-panel-strong"
-            initial={{ opacity: 0, y: 14, scale: 0.96 }}
+            className="pill-error-panel glass-panel-strong"
+            initial={{ opacity: 0, y: 12, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 14, scale: 0.96 }}
+            exit={{ opacity: 0, y: 12, scale: 0.96 }}
             transition={{ duration: 0.18 }}
           >
-            <div className="preview-panel__status">
-              <span className="status-dot" data-state={state} />
-              <span>{stateLabels[state]}</span>
-              {state === "processing" && <Wand2 size={14} />}
-              {state === "error" && pasteAttention && <AlertTriangle size={14} />}
+            <div className="pill-error-panel__header">
+              <AlertTriangle size={13} />
+              <span>{error || "Something went wrong"}</span>
+              <button
+                type="button"
+                className="pill-error-dismiss"
+                aria-label="Dismiss"
+                onClick={resetToIdle}
+              >
+                <X size={10} strokeWidth={2.5} />
+              </button>
             </div>
-            <p>{error || preview}</p>
-            {state === "error" && pasteAttention && (
-              <div className="preview-panel__actions">
-                <TextButton variant="quiet" onClick={() => window.electronAPI.openPanel()}>
-                  Open
-                </TextButton>
-              </div>
+            {pasteAttention && (
+              <>
+                <p className="pill-error-panel__hint">Press ⌘V to paste — text is on your clipboard</p>
+                <div className="pill-error-panel__actions">
+                  <TextButton variant="quiet" onClick={() => window.electronAPI.openPanel()}>
+                    Fix paste setup
+                  </TextButton>
+                </div>
+              </>
+            )}
+            {!pasteAttention && (usageLimitBlocked || weeklyUsage?.isLimitReached) && (
+              <>
+                <p className="pill-error-panel__hint">You've used your free words for this week. Upgrade for unlimited dictation.</p>
+                <div className="pill-error-panel__actions">
+                  <TextButton variant="primary" onClick={() => window.electronAPI.openPanelTab("account")}>Upgrade plan</TextButton>
+                </div>
+              </>
             )}
           </motion.section>
         )}
       </AnimatePresence>
 
-      {/* Floating mic button + cancel */}
+      {/* ── Language mismatch translation prompt ── */}
+      <AnimatePresence>
+        {langMismatch && state === "complete" && (
+          <motion.div
+            className="pill-translate-prompt"
+            initial={{ opacity: 0, y: 12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.96 }}
+            transition={{ duration: 0.18 }}
+          >
+            {/* Header row: icon + title + badge + close */}
+            <div className="pill-translate-prompt__header">
+              <div className="pill-translate-prompt__icon" aria-hidden="true">
+                <Languages size={18} />
+              </div>
+              <div className="pill-translate-prompt__title-row">
+                <span className="pill-translate-prompt__title">
+                  {LANG_DISPLAY_NAMES[langMismatch.detected] ?? langMismatch.detected} detected
+                </span>
+                <span className="pill-translate-prompt__badge">
+                  {langMismatch.detected.toUpperCase()} → {langMismatch.configured.toUpperCase()}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="pill-translate-prompt__close"
+                aria-label="Dismiss"
+                onClick={() => {
+                  log.debug("Language mismatch prompt action", {
+                    action: "keep",
+                    detected: langMismatch.detected,
+                    configured: langMismatch.configured,
+                  });
+                  resetToIdle();
+                }}
+              >
+                <X size={12} strokeWidth={2.5} />
+              </button>
+            </div>
+
+            {/* Description */}
+            <p className="pill-translate-prompt__label">
+              {`You're speaking ${LANG_DISPLAY_NAMES[langMismatch.detected] ?? langMismatch.detected}, but your transcription language is set to `}
+              <strong>{LANG_DISPLAY_NAMES[langMismatch.configured] ?? langMismatch.configured}</strong>
+              {`. Translate this dictation to ${LANG_DISPLAY_NAMES[langMismatch.configured] ?? langMismatch.configured} or continue in ${LANG_DISPLAY_NAMES[langMismatch.detected] ?? langMismatch.detected}?`}
+            </p>
+
+            {/* Primary actions */}
+            <div className="pill-translate-prompt__actions">
+              <TextButton variant="primary" onClick={() => void translateAndRepaste(langMismatch)}>
+                Translate to {LANG_DISPLAY_NAMES[langMismatch.configured] ?? langMismatch.configured}
+              </TextButton>
+              <TextButton variant="glass" onClick={() => {
+                log.debug("Language mismatch prompt action", {
+                  action: "keep",
+                  detected: langMismatch.detected,
+                  configured: langMismatch.configured,
+                });
+                resetToIdle();
+              }}>
+                Continue in {LANG_DISPLAY_NAMES[langMismatch.detected] ?? langMismatch.detected}
+              </TextButton>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Pill bar + hover controls ── */}
       <div
-        className="overlay-anchor"
+        className="pill-bar-wrapper"
         onMouseEnter={() => {
           setIsHovered(true);
           void window.electronAPI.setOverlayInteractive(true);
         }}
-        onMouseLeave={() => {
+        onMouseLeave={(e) => {
+          // Don't close if moving to the menu (pill-menu-anchor is a DOM child of this wrapper
+          // but visually outside its layout box — so check relatedTarget just in case).
+          const rel = e.relatedTarget as Element | null;
+          if (rel?.closest(".pill-menu-anchor")) return;
           setIsHovered(false);
-          if (state === "idle") void window.electronAPI.setOverlayInteractive(false);
+          // Give user 350ms to reach the context menu before closing it
+          setTimeout(() => setMenuOpen(false), 350);
         }}
       >
-        {/* Drag handle — mousedown/mouseup IPC drag matching reference repo pattern */}
-        <div
-          className="overlay-drag-grip"
-          aria-hidden="true"
+        {/* Context menu — appears above the pill when gear is clicked */}
+        <AnimatePresence>
+          {menuOpen && (
+            <PillContextMenu
+              onClose={() => setMenuOpen(false)}
+              onPasteLastTranscript={() => void pasteLastTranscript()}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Settings/menu gear button — only visible when idle and hovered */}
+        <AnimatePresence>
+          {isHovered && state === "idle" && (
+            <motion.button
+              type="button"
+              className="pill-hover-btn"
+              aria-label="Open menu"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.6 }}
+              transition={{ duration: 0.12 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen((prev) => !prev);
+              }}
+            >
+              <Settings size={12} />
+            </motion.button>
+          )}
+        </AnimatePresence>
+
+        {/* The main pill — framer-motion spring handles width/height transitions */}
+        <motion.div
+          className="pill-bar"
+          data-state={micState}
+          animate={pillSize}
+          transition={{ type: "spring", stiffness: 260, damping: 32, mass: 0.8 }}
+          aria-label={state === "recording" ? "Stop dictation" : "Start dictation"}
+          role="button"
+          tabIndex={0}
           onMouseDown={(e) => {
-            if (e.button === 0) {
+            // Allow dragging the pill when idle
+            if (e.button === 0 && state === "idle") {
+              isDraggingRef.current = false; // reset; set to true only on actual move
               e.preventDefault();
+            }
+          }}
+          onMouseMove={(e) => {
+            if (e.buttons === 1 && state === "idle" && !isDraggingRef.current) {
+              isDraggingRef.current = true;
               setIsDragging(true);
               void window.electronAPI.startWindowDrag();
             }
           }}
-          onMouseUp={() => {
-            setIsDragging(false);
-            void window.electronAPI.stopWindowDrag();
+          onClick={() => {
+            if (!isDraggingRef.current) void toggleDictation();
           }}
-        />
-
-        <div className="overlay-anchor__buttons">
-          {/* Cancel button — appears on hover during recording */}
-          <AnimatePresence>
-            {(state === "recording" || state === "processing") && isHovered && (
-              <motion.button
-                type="button"
-                className="overlay-cancel-btn"
-                aria-label="Cancel"
-                initial={{ opacity: 0, scale: 0.6 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.6 }}
-                transition={{ duration: 0.12 }}
-                onClick={() => {
-                  log.info("Cancel clicked", { state });
-                  if (state === "recording") stopDictation();
-                }}
+        >
+          {/* Inner content — fades in/out when pill expands */}
+          <AnimatePresence mode="wait">
+            {(micState === "idle" || micState === "hover") && isPillExpanded && (
+              <motion.div
+                key="dots"
+                className="pill-bar__inner"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
               >
-                <X size={10} strokeWidth={2.5} />
-              </motion.button>
+                <PillDots />
+              </motion.div>
+            )}
+            {micState === "recording" && (
+              <motion.div
+                key="wave"
+                className="pill-bar__inner"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
+              >
+                {hasVoice ? <PillWave /> : <PillDots />}
+              </motion.div>
+            )}
+            {micState === "processing" && (
+              <motion.div
+                key="processing"
+                className="pill-bar__inner"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
+              >
+                <PillProcessing />
+              </motion.div>
             )}
           </AnimatePresence>
+        </motion.div>
 
-          {/* Circular mic button — visual state driven by micState */}
-          <button
-            type="button"
-            className="overlay-mic-btn"
-            data-state={micState}
-            aria-label={state === "recording" ? "Stop dictation" : "Start dictation"}
-            disabled={state === "processing"}
-            onClick={() => {
-              log.debug("Mic button clicked", { state });
-              void toggleDictation();
-            }}
-          >
-            {(micState === "idle" || micState === "hover") && <SoundWaveIcon size={micState === "idle" ? 14 : 16} />}
-            {micState === "complete" && <SoundWaveIcon size={16} />}
-            {micState === "recording" && <RecordingWave />}
-            {micState === "processing" && <ProcessingWave />}
-            {micState === "error" && <X size={16} strokeWidth={2.5} />}
-          </button>
-        </div>
+        {/* Cancel button — appears to the right of the pill while recording */}
+        <AnimatePresence>
+          {(state === "recording" || state === "processing") && isHovered && (
+            <motion.button
+              type="button"
+              className="pill-hover-btn pill-hover-btn--danger"
+              aria-label="Cancel"
+              initial={{ opacity: 0, scale: 0.6 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.6 }}
+              transition={{ duration: 0.12 }}
+              onClick={() => {
+                log.info("Cancel clicked", { state });
+                if (state === "recording") stopDictation();
+              }}
+            >
+              <X size={12} strokeWidth={2.5} />
+            </motion.button>
+          )}
+        </AnimatePresence>
       </div>
     </main>
+    </I18nProvider>
   );
 }
 

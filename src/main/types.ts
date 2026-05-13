@@ -1,3 +1,18 @@
+export type ReferralInvite = {
+  email: string;
+  sentAt: string; // ISO
+  status: "pending" | "signed_up" | "rewarded";
+};
+
+export type ReferralStatus = {
+  referralUrl: string;
+  totalInvites: number;
+  rewardsEarned: number;
+  invites: ReferralInvite[];
+};
+
+export type DisplayLanguage = "en" | "fr-FR";
+
 export type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
 
 export type BillingPlan = "free" | "starter" | "pro";
@@ -39,6 +54,7 @@ export type AppSettings = {
   transcriptionMode: "local" | "cloud";
   selectedModel: string;
   language: string;
+  displayLanguage: DisplayLanguage;
   customDictionary: string[];
   cleanupEnabled: boolean;
   agentName: string;
@@ -90,6 +106,23 @@ export type PasteResult = {
   fallback: boolean;
   message?: string;
   attention?: PasteAttention;
+};
+
+export type WeeklyUsageStatus = {
+  wordsUsed: number;
+  wordsLimit: number | null;
+  wordsRemaining: number | null;
+  usageRatio: number;
+  isLimited: boolean;
+  isApproachingLimit: boolean;
+  isLimitReached: boolean;
+};
+
+export type LangMismatch = {
+  /** ISO 639-1 code of the detected spoken language, e.g. "en" */
+  detected: string;
+  /** ISO 639-1 code of the configured transcription language, e.g. "fr" */
+  configured: string;
 };
 
 export type DesktopUpdateFile = {

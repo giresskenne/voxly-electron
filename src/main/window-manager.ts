@@ -71,7 +71,8 @@ export class WindowManager {
   overlay: BrowserWindow | null = null;
   settings: BrowserWindow | null = null;
   private dragManager = new DragManager();
-  private panelStartPosition: "bottom-right" | "bottom-left" | "center" = "bottom-right";
+  private panelStartPosition: "bottom-right" | "bottom-left" | "center" = "center";
+  private hideUntil = 0;
 
   startWindowDrag(): void {
     this.dragManager.start();
@@ -126,6 +127,11 @@ export class WindowManager {
     this.overlay.loadURL(url);
     this.overlay.once("ready-to-show", () => {
       log.info("Overlay ready to show");
+      // Re-apply computed center bounds so the window is always in the correct
+      // position even if the OS moved it during window creation.
+      const cursorAtShow = screen.getCursorScreenPoint();
+      const waAtShow = screen.getDisplayNearestPoint(cursorAtShow).workArea;
+      this.overlay?.setBounds(this.overlayBoundsForDisplay(waAtShow, width, height));
       this.overlay?.showInactive();
       if (this.overlay) enforceAlwaysOnTop(this.overlay);
     });
@@ -198,15 +204,30 @@ export class WindowManager {
     this.overlay?.webContents.send("dictation:toggle");
   }
 
+  sendSettingsDictationToggle(): void {
+    log.debug("Sending dictation toggle to settings", { hasSettings: Boolean(this.settings && !this.settings.isDestroyed()) });
+    this.settings?.webContents.send("dictation:toggle");
+  }
+
   sendDictationStart(): void {
     log.debug("Sending dictation start to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
     this.showDictationPanel();
     this.overlay?.webContents.send("dictation:start");
   }
 
+  sendSettingsDictationStart(): void {
+    log.debug("Sending dictation start to settings", { hasSettings: Boolean(this.settings && !this.settings.isDestroyed()) });
+    this.settings?.webContents.send("dictation:start");
+  }
+
   sendDictationStop(): void {
     log.debug("Sending dictation stop to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
     this.overlay?.webContents.send("dictation:stop");
+  }
+
+  sendSettingsDictationStop(): void {
+    log.debug("Sending dictation stop to settings", { hasSettings: Boolean(this.settings && !this.settings.isDestroyed()) });
+    this.settings?.webContents.send("dictation:stop");
   }
 
   sendSettingsUpdated(settings: AppSettings): void {
@@ -226,6 +247,22 @@ export class WindowManager {
   sendTranscriptionSaved(): void {
     log.debug("Broadcasting transcription:saved");
     this.settings?.webContents.send("transcription:saved");
+  }
+
+  sendSessionExpired(): void {
+    log.warn("Broadcasting auth:session-expired");
+    for (const win of [this.overlay, this.settings]) {
+      win?.webContents.send("auth:session-expired");
+    }
+  }
+
+  openSettingsTab(tab: string): void {
+    log.debug("Opening settings tab", { tab });
+    this.createSettings();
+    // Small delay to ensure the window is loaded before sending the navigation event
+    setTimeout(() => {
+      this.settings?.webContents.send("settings:navigate-tab", tab);
+    }, 150);
   }
 
   setOverlayInteractive(interactive: boolean): void {
@@ -259,6 +296,24 @@ export class WindowManager {
     }
 
     enforceAlwaysOnTop(this.overlay);
+  }
+
+  hideOverlayForHour(): void {
+    if (!this.overlay || this.overlay.isDestroyed()) return;
+    this.hideUntil = Date.now() + 60 * 60 * 1000;
+    this.overlay.hide();
+    log.info("Overlay hidden for 1 hour");
+    setTimeout(() => {
+      if (!this.overlay || this.overlay.isDestroyed()) return;
+      this.hideUntil = 0;
+      this.overlay.showInactive();
+      enforceAlwaysOnTop(this.overlay);
+      log.info("Overlay visible again after 1-hour hide");
+    }, 60 * 60 * 1000);
+  }
+
+  isHiddenByUser(): boolean {
+    return Date.now() < this.hideUntil;
   }
 
   async prepareOverlayForPaste(): Promise<void> {

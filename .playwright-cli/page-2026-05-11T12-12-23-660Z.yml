@@ -1,0 +1,165 @@
+- generic [ref=e2]:
+  - navigation [ref=e3]:
+    - generic [ref=e4]:
+      - link "Dicta Fun Dicta Fun" [ref=e5] [cursor=pointer]:
+        - /url: /
+        - img "Dicta Fun" [ref=e6]
+        - generic [ref=e7]: Dicta Fun
+      - generic [ref=e8]:
+        - link "How it works" [ref=e9] [cursor=pointer]:
+          - /url: "#how-it-works"
+        - link "FAQ" [ref=e10] [cursor=pointer]:
+          - /url: "#faq"
+  - generic [ref=e16]:
+    - generic [ref=e17]:
+      - generic [ref=e20]: Voice-first AI writing assistant
+      - heading "#1 Voice-to-Text AI for Writing" [level=1] [ref=e21]:
+        - text: "#1 Voice-to-Text"
+        - text: AI for Writing
+      - paragraph [ref=e22]: Speak naturally and Dicta turns your raw thoughts into polished emails, notes, posts, scripts, and messages — in seconds.
+      - generic [ref=e23]:
+        - link "Download for macOS" [ref=e204] [cursor=pointer]:
+          - /url: https://downloads.dictafun.com/desktop/latest/mac/Dicta%20Fun-1.0.4-arm64.dmg
+          - img [ref=e205]
+          - text: Download for macOS
+        - generic [ref=e28]:
+          - link "Download for macOS" [ref=e208] [cursor=pointer]:
+            - /url: https://downloads.dictafun.com/desktop/latest/mac/Dicta%20Fun-1.0.4-arm64.dmg
+          - link "Download for Windows" [ref=e209] [cursor=pointer]:
+            - /url: https://downloads.dictafun.com/desktop/latest/windows/Dicta%20Fun%20Setup%201.0.4.exe
+        - paragraph [ref=e31]: The latest desktop installer will download directly.
+    - img "Dicta app interface showing voice recording and text polishing" [ref=e35]
+  - generic [ref=e37]:
+    - heading "How Dicta helps while you speak" [level=2] [ref=e38]
+    - generic [ref=e39]:
+      - generic [ref=e40]:
+        - img "Voice recording in progress" [ref=e43]
+        - generic [ref=e44]:
+          - heading "Dicta listens to your voice" [level=3] [ref=e45]
+          - paragraph [ref=e46]: Just tap record and speak naturally. Dicta turns your speech into text in real time so your thoughts stay easy to edit.
+      - generic [ref=e47]:
+        - generic [ref=e48]:
+          - heading "When you need help, Dicta polishes instantly" [level=3] [ref=e49]
+          - paragraph [ref=e50]: Choose a writing mode — professional email, casual message, LinkedIn post — and Dicta rewrites your thoughts beautifully.
+        - img "AI text polishing" [ref=e53]
+  - generic [ref=e56]:
+    - heading "Instant polished writing" [level=2] [ref=e57]
+    - paragraph [ref=e58]: Turn messy voice notes into clear, structured text — ready to paste anywhere.
+    - img "Polished notes output" [ref=e61]
+  - generic [ref=e64]:
+    - heading "Works for every writing task" [level=2] [ref=e65]
+    - paragraph [ref=e66]: Speak it. Dicta writes it. In the format you need.
+    - generic [ref=e67]:
+      - generic [ref=e69]:
+        - img [ref=e71]
+        - heading "Professional emails" [level=3] [ref=e74]
+        - paragraph [ref=e75]: Dictate your thoughts and Dicta turns them into polished, professional emails ready to send.
+      - generic [ref=e77]:
+        - img [ref=e79]
+        - heading "Social posts & messages" [level=3] [ref=e81]
+        - paragraph [ref=e82]: Create LinkedIn posts, WhatsApp messages, and social content — just by speaking naturally.
+      - generic [ref=e84]:
+        - img [ref=e86]
+        - heading "Notes & scripts" [level=3] [ref=e89]
+        - paragraph [ref=e90]: Capture meeting notes, brainstorms, and scripts. Dicta structures and cleans up everything.
+  - generic [ref=e93]:
+    - img "Real-time transcription" [ref=e96]
+    - generic [ref=e97]:
+      - heading "Real-time transcription" [level=2] [ref=e98]
+      - generic [ref=e99]:
+        - generic [ref=e100]:
+          - generic [ref=e101]: 9+
+          - generic [ref=e102]:
+            - generic [ref=e103]: Writing modes
+            - paragraph [ref=e104]: Professional email, WhatsApp, LinkedIn, translate, and more.
+        - generic [ref=e105]:
+          - generic [ref=e106]: 300ms
+          - generic [ref=e107]:
+            - generic [ref=e108]: Response time
+            - paragraph [ref=e109]: Near-instant transcription that keeps up with natural speech.
+        - generic [ref=e110]:
+          - generic [ref=e111]: 95%
+          - generic [ref=e112]:
+            - generic [ref=e113]: Transcription accuracy
+            - paragraph [ref=e114]: Industry-leading accuracy in French, English, and Franglais.
+  - generic [ref=e116]:
+    - heading "Frequently asked questions" [level=2] [ref=e117]
+    - generic [ref=e118]:
+      - button "How does Dicta turn voice into polished text?" [ref=e120]:
+        - generic [ref=e121]: How does Dicta turn voice into polished text?
+        - img [ref=e122]
+      - button "What languages does Dicta support?" [ref=e125]:
+        - generic [ref=e126]: What languages does Dicta support?
+        - img [ref=e127]
+      - button "Is Dicta free?" [ref=e130]:
+        - generic [ref=e131]: Is Dicta free?
+        - img [ref=e132]
+      - button "Does it work offline?" [ref=e135]:
+        - generic [ref=e136]: Does it work offline?
+        - img [ref=e137]
+      - button "What writing modes are available?" [ref=e140]:
+        - generic [ref=e141]: What writing modes are available?
+        - img [ref=e142]
+      - button "Can I use it during meetings?" [ref=e145]:
+        - generic [ref=e146]: Can I use it during meetings?
+        - img [ref=e147]
+  - generic [ref=e155]:
+    - heading "AI that helps while you speak, not after." [level=2] [ref=e156]
+    - paragraph [ref=e157]: Try Dicta on your next email, message, or note today.
+    - generic [ref=e158]:
+      - link "Download for macOS" [ref=e210] [cursor=pointer]:
+        - /url: https://downloads.dictafun.com/desktop/latest/mac/Dicta%20Fun-1.0.4-arm64.dmg
+        - img [ref=e211]
+        - text: Download for macOS
+      - generic [ref=e163]:
+        - link "Download for macOS" [ref=e214] [cursor=pointer]:
+          - /url: https://downloads.dictafun.com/desktop/latest/mac/Dicta%20Fun-1.0.4-arm64.dmg
+        - link "Download for Windows" [ref=e215] [cursor=pointer]:
+          - /url: https://downloads.dictafun.com/desktop/latest/windows/Dicta%20Fun%20Setup%201.0.4.exe
+  - contentinfo [ref=e166]:
+    - generic [ref=e167]:
+      - generic [ref=e168]:
+        - generic [ref=e169]:
+          - img "Dicta Fun" [ref=e170]
+          - generic [ref=e171]: Dicta Fun
+        - paragraph [ref=e172]: Voice-first AI writing assistant.
+      - generic [ref=e173]:
+        - heading "Product" [level=4] [ref=e174]
+        - list [ref=e175]:
+          - listitem [ref=e176]:
+            - link "Features" [ref=e177] [cursor=pointer]:
+              - /url: /#features
+          - listitem [ref=e178]:
+            - link "Pricing" [ref=e179] [cursor=pointer]:
+              - /url: /pricing
+          - listitem [ref=e180]:
+            - link "Download" [ref=e181] [cursor=pointer]:
+              - /url: /download
+          - listitem [ref=e182]:
+            - link "Release notes" [ref=e183] [cursor=pointer]:
+              - /url: /release-notes
+          - listitem [ref=e184]:
+            - link "Account" [ref=e185] [cursor=pointer]:
+              - /url: /app
+      - generic [ref=e186]:
+        - heading "Resources" [level=4] [ref=e187]
+        - list [ref=e188]:
+          - listitem [ref=e189]:
+            - link "Support" [ref=e190] [cursor=pointer]:
+              - /url: mailto:hello@dictafun.com
+          - listitem [ref=e191]:
+            - link "Contact" [ref=e192] [cursor=pointer]:
+              - /url: mailto:hello@dictafun.com
+      - generic [ref=e193]:
+        - heading "Legal" [level=4] [ref=e194]
+        - list [ref=e195]:
+          - listitem [ref=e196]:
+            - link "Privacy" [ref=e197] [cursor=pointer]:
+              - /url: /privacy
+          - listitem [ref=e198]:
+            - link "Terms" [ref=e199] [cursor=pointer]:
+              - /url: /terms
+          - listitem [ref=e200]:
+            - link "Refunds" [ref=e201] [cursor=pointer]:
+              - /url: /refund-policy
+    - paragraph [ref=e203]: © 2026 Masterpiece Technologies Inc. Dicta Fun. All rights reserved.

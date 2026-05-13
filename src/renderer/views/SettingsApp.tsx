@@ -8,14 +8,17 @@ import {
   CheckCircle2,
   ChevronRight,
   Circle,
+  Copy,
   CreditCard,
   Download,
+  Gift,
   Globe,
-  HelpCircle,
   Home,
+  HelpCircle,
   LockKeyhole,
   LogIn,
   LogOut,
+  MessageSquare,
   Mic,
   MousePointerClick,
   Plus,
@@ -28,28 +31,34 @@ import {
   Star,
   Trash2,
   UserCircle,
-  Users,
-  Zap,
+  X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AppSettings,
   BillingInterval,
   DesktopUpdateStatus,
   EntitlementStatus,
   PaidPlan,
+  ReferralInvite,
+  ReferralStatus,
   RuntimeStatus,
   TranscriptionRecord,
+  WeeklyUsageStatus,
 } from "../../main/types";
 import { BrandMark } from "../components/BrandMark";
 import { TextButton } from "../components/Controls";
+import heroBg from "../assets/hero-bg-gradient.jpg";
 import { modelOptions } from "../design/source";
 import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
+import { I18nProvider, displayLanguageOptions, htmlLang, translate, useT } from "../lib/i18n";
 
 const log = createRendererLogger("settings-ui");
 const ENTITLEMENT_REFRESH_MS = 60_000;
+const SHORTCUT_TEST_AUDIO_BITS_PER_SECOND = 128_000;
+const canSkipOnboarding = import.meta.env.DEV;
 
 const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   isAuthenticated: false,
@@ -62,52 +71,475 @@ const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   reason: "not-checked",
 };
 
-function formatPlanLabel(plan: EntitlementStatus["billingPlan"]): string {
-  if (plan === "pro") return "Pro plan";
-  if (plan === "starter") return "Starter plan";
-  return "Free plan";
+function formatPlanLabel(plan: EntitlementStatus["billingPlan"], t: ReturnType<typeof useT>): string {
+  if (plan === "pro") return t("plan.pro");
+  if (plan === "starter") return t("plan.starter");
+  return t("plan.free");
 }
 
-function formatUpdateStatus(status: DesktopUpdateStatus | null, currentVersion: string): string {
-  if (!status) return `Current version: ${currentVersion}.`;
+function formatUpdateStatus(status: DesktopUpdateStatus | null, currentVersion: string, t: ReturnType<typeof useT>): string {
+  if (!status) return t("settings.currentVersion", { version: currentVersion });
   if (status.updateAvailable && status.latestVersion) {
-    return `Version ${status.latestVersion} is available.`;
+    return t("settings.versionAvailable", { version: status.latestVersion });
   }
   if (status.latestVersion) {
-    return `You are up to date on version ${currentVersion}.`;
+    return t("settings.upToDate", { version: currentVersion });
   }
-  return "Update checks are not configured for this build.";
+  return t("settings.updateUnavailable");
 }
 
-const hotkeyModeOptions: Array<{
+function usagePercent(usage: WeeklyUsageStatus | null): number {
+  if (!usage?.wordsLimit) return 0;
+  return Math.min(100, Math.round((usage.wordsUsed / usage.wordsLimit) * 100));
+}
+
+// ── Help & Feedback Modal ─────────────────────────────────────────────────────
+
+type HelpFeedbackTab = "feedback" | "help";
+
+function HelpFeedbackModal({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<HelpFeedbackTab>("help");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function handleSend() {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      await window.electronAPI.sendFeedback(trimmed);
+      setStatus({ ok: true, text: "Thanks for your feedback!" });
+      setMessage("");
+    } catch (err) {
+      setStatus({ ok: false, text: err instanceof Error ? err.message : "Failed to send. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="hf-modal__backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Help & Feedback">
+      <div className="hf-modal__panel glass-panel-strong" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="hf-modal__close" onClick={onClose} aria-label="Close">
+          <X size={16} />
+        </button>
+
+        <h2 className="hf-modal__title">Help &amp; Feedback</h2>
+
+        {/* Tabs */}
+        <div className="hf-modal__tabs" role="tablist">
+          {([
+            ["help", "Help"] as const,
+            ["feedback", "Feedback"] as const,
+          ]).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              className={cn("hf-modal__tab", tab === id && "is-active")}
+              onClick={() => { setTab(id); setStatus(null); }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Tab: Help ── */}
+        {tab === "help" && (
+          <div className="hf-modal__tab-panel">
+            <ul className="hf-modal__help-list">
+              <li>
+                <span className="hf-modal__help-icon">🎙️</span>
+                <div>
+                  <strong>Start dictating</strong>
+                  <p>Press your hotkey once to start recording, then press it again (or release, in push-to-talk mode) to transcribe.</p>
+                </div>
+              </li>
+              <li>
+                <span className="hf-modal__help-icon">⌨️</span>
+                <div>
+                  <strong>Change your hotkey</strong>
+                  <p>Go to Settings and click on the hotkey field to record a new shortcut.</p>
+                </div>
+              </li>
+              <li>
+                <span className="hf-modal__help-icon">🔒</span>
+                <div>
+                  <strong>Microphone or accessibility access</strong>
+                  <p>Voxly needs microphone permission to record and accessibility permission to auto-paste text.</p>
+                </div>
+              </li>
+              <li>
+                <span className="hf-modal__help-icon">📖</span>
+                <div>
+                  <strong>Custom dictionary</strong>
+                  <p>Add names or technical terms in Settings → Dictionary to improve accuracy.</p>
+                </div>
+              </li>
+            </ul>
+            <button
+              type="button"
+              className="hf-modal__help-link"
+              onClick={() => window.electronAPI.openWebRoute("help")}
+            >
+              View full help docs →
+            </button>
+          </div>
+        )}
+
+        {/* ── Tab: Feedback ── */}
+        {tab === "feedback" && (
+          <div className="hf-modal__tab-panel">
+            <p className="hf-modal__feedback-desc">
+              Have a suggestion, found a bug, or just want to say hi? We read every message.
+            </p>
+            <textarea
+              className="hf-modal__textarea"
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              placeholder="What's on your mind?"
+              rows={5}
+              aria-label="Feedback message"
+            />
+            {status && (
+              <p className={cn("hf-modal__msg", status.ok && "is-ok")}>{status.text}</p>
+            )}
+            <div className="hf-modal__actions">
+              <button
+                type="button"
+                className="hf-modal__send-btn"
+                onClick={() => void handleSend()}
+                disabled={!message.trim() || busy}
+              >
+                {busy ? "Sending…" : "Send feedback"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Referral Modal ────────────────────────────────────────────────────────────
+
+type ReferralTab = "refer" | "past-invites" | "apply";
+
+function ReferralModal({ onClose, isAuthenticated }: { onClose: () => void; isAuthenticated: boolean }) {
+  const [tab, setTab] = useState<ReferralTab>("refer");
+  const [status, setStatus] = useState<ReferralStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [email, setEmail] = useState("");
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState("");
+  const [applyCode, setApplyCode] = useState("");
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [applyMsg, setApplyMsg] = useState("");
+
+  const referralUrl = status?.referralUrl ?? null;
+
+  function loadStatus() {
+    setLoading(true);
+    setLoadError(null);
+    void window.electronAPI.getReferralStatus()
+      .then((s) => setStatus(s))
+      .catch((err: unknown) => {
+        setLoadError(err instanceof Error ? err.message : "Could not load your referral link.");
+      })
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadStatus();
+    } else {
+      setLoading(false);
+    }
+  }, [isAuthenticated]);
+
+  function handleCopy() {
+    if (!referralUrl) return;
+    void navigator.clipboard.writeText(referralUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function handleSendInvite() {
+    const trimmed = email.trim();
+    if (!trimmed) return;
+    setInviteBusy(true);
+    setInviteMsg("");
+    try {
+      await window.electronAPI.sendReferralInvite(trimmed);
+      setInviteMsg("Invite sent!");
+      setEmail("");
+      loadStatus(); // refresh past-invites count
+    } catch (err) {
+      setInviteMsg(err instanceof Error ? err.message : "Failed to send invite.");
+    } finally {
+      setInviteBusy(false);
+      setTimeout(() => setInviteMsg(""), 3500);
+    }
+  }
+
+  async function handleApplyCode() {
+    const trimmed = applyCode.trim();
+    if (!trimmed) return;
+    setApplyBusy(true);
+    setApplyMsg("");
+    try {
+      await window.electronAPI.applyReferralCode(trimmed);
+      setApplyMsg("Code applied! Your free month will be credited to your next payment.");
+      setApplyCode("");
+    } catch (err) {
+      setApplyMsg(err instanceof Error ? err.message : "Invalid or already-used code.");
+    } finally {
+      setApplyBusy(false);
+    }
+  }
+
+  const inviteCount = status?.invites.length ?? 0;
+
+  return (
+    <div className="referral-modal__backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Get a free month">
+      <div className="referral-modal__panel glass-panel-strong" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="referral-modal__close" onClick={onClose} aria-label="Close">
+          <X size={16} />
+        </button>
+
+        {/* Header */}
+        <h2 className="referral-modal__title">Refer and earn rewards</h2>
+
+        {/* ── Sign-in gate ── */}
+        {!isAuthenticated ? (
+          <div className="referral-modal__gate">
+            <div className="referral-modal__gate-icon">🔒</div>
+            <p className="referral-modal__gate-msg">
+              Sign in to get your personal invite link and earn a <strong>free month</strong> for every friend you refer.
+            </p>
+            <button
+              type="button"
+              className="referral-modal__send-btn"
+              onClick={() => { onClose(); void window.electronAPI.openWebRoute("signin"); }}
+            >
+              Sign in / Sign up
+            </button>
+          </div>
+        ) : (
+        <>
+        <p className="referral-modal__subtitle">
+          Give a friend 1 month of Pro and get <strong>1 free month</strong> for each person you refer.
+        </p>
+
+        {/* Tabs */}
+        <div className="referral-modal__tabs" role="tablist">
+          {([
+            ["refer", "Refer"],
+            ["past-invites", `Past invites (${inviteCount})`],
+            ["apply", "Apply referral"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              className={cn("referral-modal__tab", tab === id && "is-active")}
+              onClick={() => setTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Tab: Refer ── */}
+        {tab === "refer" && (
+          <div className="referral-modal__tab-panel">
+            {/* How it works */}
+            <p className="referral-modal__section-label">How it works</p>
+            <ul className="referral-modal__steps">
+              <li><span>📣</span><span>Share your invite link</span></li>
+              <li><span>👑</span><span>They sign up and get a <strong>free month of Pro!</strong></span></li>
+              <li><span>🎉</span><span>You get a <strong>free month</strong> when they dictate 2,000 words.</span></li>
+            </ul>
+
+            {/* Your invite link */}
+            <div className="referral-modal__section-label-row">
+              <span className="referral-modal__section-label">Your invite link</span>
+              <button
+                type="button"
+                className="referral-modal__refresh"
+                onClick={loadStatus}
+                aria-label="Refresh link"
+              >
+                <RefreshCw size={13} />
+              </button>
+            </div>
+            <div className="referral-modal__link-row">
+              <input
+                className="referral-modal__link-input"
+                readOnly
+                value={loading ? "Loading your link…" : loadError ? "Could not load link" : (referralUrl ?? "")}
+                onFocus={(e) => !loading && !loadError && e.target.select()}
+                aria-label="Your referral link"
+              />
+              <button
+                type="button"
+                className={cn("referral-modal__copy-btn", copied && "is-copied")}
+                onClick={handleCopy}
+                disabled={loading || !!loadError || !referralUrl}
+                aria-label="Copy referral link"
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                <span>{copied ? "Copied!" : "Copy"}</span>
+              </button>
+            </div>
+
+            {/* Send invites */}
+            <p className="referral-modal__section-label" style={{ marginTop: 16 }}>Send invites</p>
+            <div className="referral-modal__email-row">
+              <input
+                type="email"
+                className="referral-modal__email-input"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void handleSendInvite()}
+                placeholder="email@example.com"
+                aria-label="Friend's email address"
+              />
+              <button
+                type="button"
+                className="referral-modal__send-btn"
+                onClick={() => void handleSendInvite()}
+                disabled={!email.trim() || inviteBusy}
+              >
+                {inviteBusy ? "Sending…" : "Send"}
+              </button>
+            </div>
+            {loadError && <p className="referral-modal__msg" style={{ marginTop: 8 }}>{loadError}</p>}
+            {inviteMsg && <p className={cn("referral-modal__msg", inviteMsg.startsWith("Invite") && "is-ok")}>{inviteMsg}</p>}
+
+            {/* Footer note */}
+            <p className="referral-modal__footer">
+              Rewards auto-applied to your next subscription payment.
+            </p>
+          </div>
+        )}
+
+        {/* ── Tab: Past invites ── */}
+        {tab === "past-invites" && (
+          <div className="referral-modal__tab-panel">
+            {loading && <p className="referral-modal__loading">Loading…</p>}
+            {!loading && inviteCount === 0 && (
+              <div className="referral-modal__empty">
+                <Gift size={32} />
+                <p>No invites sent yet.</p>
+                <small>Send your first invite from the Refer tab.</small>
+              </div>
+            )}
+            {!loading && inviteCount > 0 && (
+              <ul className="referral-modal__invite-list">
+                {(status as ReferralStatus).invites.map((invite: ReferralInvite) => (
+                  <li key={invite.email} className="referral-modal__invite-row">
+                    <span className="referral-modal__invite-email">{invite.email}</span>
+                    <span className={cn("referral-modal__invite-status", `is-${invite.status}`)}>
+                      {invite.status === "rewarded" ? "Rewarded" : invite.status === "signed_up" ? "Signed up" : "Pending"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* ── Tab: Apply referral ── */}
+        {tab === "apply" && (
+          <div className="referral-modal__tab-panel">
+            <p className="referral-modal__apply-desc">
+              Have a referral code from a friend? Enter it below to get your first month of Pro free.
+            </p>
+            <div className="referral-modal__email-row">
+              <input
+                className="referral-modal__email-input"
+                value={applyCode}
+                onChange={(e) => setApplyCode(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && void handleApplyCode()}
+                placeholder="Enter referral code"
+                aria-label="Referral code"
+              />
+              <button
+                type="button"
+                className="referral-modal__send-btn"
+                onClick={() => void handleApplyCode()}
+                disabled={!applyCode.trim() || applyBusy}
+              >
+                {applyBusy ? "Applying…" : "Apply"}
+              </button>
+            </div>
+            {applyMsg && <p className={cn("referral-modal__msg", applyMsg.startsWith("Code") && "is-ok")}>{applyMsg}</p>}
+          </div>
+        )}
+        </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatUsageLine(
+  usage: WeeklyUsageStatus | null,
+  entitlement: EntitlementStatus,
+  t: ReturnType<typeof useT>,
+): string {
+  if (!usage) return t("usage.loading");
+  if (!usage.isLimited) return t("usage.unlimited");
+  if (usage.wordsLimit === null) return t("usage.unavailable");
+  if (usage.wordsUsed > 0) {
+    return `${usage.wordsUsed.toLocaleString()} / ${usage.wordsLimit.toLocaleString()} free words this week`;
+  }
+  return entitlement.isAuthenticated ? t("usage.freeWordsWeek") : t("usage.signInOrUpgrade");
+}
+
+function hotkeyModeOptions(t: ReturnType<typeof useT>): Array<{
   value: AppSettings["mode"];
   label: string;
   description: string;
   icon: LucideIcon;
-}> = [
-  {
-    value: "tap-to-talk",
-    label: "Press twice",
-    description: "Press once to start, then press again to stop.",
-    icon: MousePointerClick,
-  },
-  {
-    value: "push-to-talk",
-    label: "Press and hold",
-    description: "Hold the hotkey while speaking, release to stop.",
-    icon: Mic,
-  },
-];
+}> {
+  return [
+    {
+      value: "push-to-talk",
+      label: t("settings.pressHold"),
+      description: t("settings.pressHoldDetail"),
+      icon: Mic,
+    },
+    {
+      value: "tap-to-talk",
+      label: t("settings.pressTwice"),
+      description: t("settings.pressTwiceDetail"),
+      icon: MousePointerClick,
+    },
+  ];
+}
 
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [entitlement, setEntitlement] = useState<EntitlementStatus>(DEFAULT_ENTITLEMENT);
   const [history, setHistory] = useState<TranscriptionRecord[]>([]);
-  const [weeklyUsage, setWeeklyUsage] = useState<{ wordsUsed: number; wordsLimit: number } | null>(null);
+  const [weeklyUsage, setWeeklyUsage] = useState<WeeklyUsageStatus | null>(null);
   const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [activeSection, setActiveSection] = useState("home");
+  const [settingsDefaultTab, setSettingsDefaultTab] = useState<"general" | "account" | "privacy">("general");
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [referralOpen, setReferralOpen] = useState(false);
+  const [helpFeedbackOpen, setHelpFeedbackOpen] = useState(false);
+  const lastEntitlementSyncRef = useRef<number>(0);
 
   useEffect(() => {
     log.info("Settings app mounted");
@@ -115,6 +547,7 @@ export function SettingsApp() {
     const offRuntime = window.electronAPI.onRuntimeStatus(setRuntime);
     const offSaved = window.electronAPI.onTranscriptionSaved(() => {
       window.electronAPI.listHistory(20).then(setHistory);
+      window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
     });
     const offSettings = window.electronAPI.onSettingsUpdated((nextSettings) => {
       setSettings(nextSettings);
@@ -123,23 +556,41 @@ export function SettingsApp() {
       log.info("Received deep link", { url });
       void handleDeepLink(url);
     });
+    const offSessionExpired = window.electronAPI.onSessionExpired(() => {
+      log.warn("Session expired — user must sign in again");
+      void syncEntitlement(true);
+      // Navigate to the account/sign-in tab so the sign-in button is visible
+      setActiveSection("settings");
+      setSettingsDefaultTab("account");
+    });
+    const offNavigateTab = window.electronAPI.onSettingsNavigateTab((tab) => {
+      log.debug("Navigate-tab event received", { tab });
+      setActiveSection("settings");
+      if (tab === "account" || tab === "general" || tab === "privacy") {
+        setSettingsDefaultTab(tab);
+      }
+    });
     return () => {
       log.info("Settings app unmounted");
       offRuntime();
       offSaved();
       offSettings();
       offDeepLink();
+      offSessionExpired();
+      offNavigateTab();
     };
   }, []);
 
   useEffect(() => {
+    const SYNC_DEBOUNCE_MS = 5_000;
     const syncOnResume = () => {
+      const now = Date.now();
+      if (now - lastEntitlementSyncRef.current < SYNC_DEBOUNCE_MS) return;
+      lastEntitlementSyncRef.current = now;
       void syncEntitlement(true);
     };
     const onVisibility = () => {
-      if (!document.hidden) {
-        void syncEntitlement(true);
-      }
+      if (!document.hidden) syncOnResume();
     };
     window.addEventListener("focus", syncOnResume);
     document.addEventListener("visibilitychange", onVisibility);
@@ -154,10 +605,15 @@ export function SettingsApp() {
     };
   }, []);
 
+  useEffect(() => {
+    document.documentElement.lang = htmlLang(settings?.displayLanguage ?? "en");
+  }, [settings?.displayLanguage]);
+
   async function syncEntitlement(force = false) {
     const synced = await window.electronAPI.syncEntitlement(force);
     setEntitlement(synced.entitlements);
     setSettings(synced.settings);
+    setWeeklyUsage(await window.electronAPI.getWordCountThisWeek());
   }
 
   async function refresh() {
@@ -211,8 +667,9 @@ export function SettingsApp() {
       return;
     }
 
-    log.info("Applying auth callback token");
-    await window.electronAPI.setSessionToken(token);
+    const refreshToken = parsed.searchParams.get("refresh_token") ?? undefined;
+    log.info("Applying auth callback token", { hasRefreshToken: Boolean(refreshToken) });
+    await window.electronAPI.setSessionToken(token, refreshToken);
     await syncEntitlement(true);
   }
 
@@ -247,22 +704,26 @@ export function SettingsApp() {
 
 
   if (!settings || !runtime) {
-    return <div className="app-loading">Loading Dicta Fun...</div>;
+    return <div className="app-loading">{translate("en", "app.loading")}</div>;
   }
 
   if (!settings.onboardingComplete) {
     log.debug("Rendering onboarding flow");
     return (
-      <OnboardingFlow
-        settings={settings}
-        runtime={runtime}
-        onRefresh={refresh}
-        onPatchSettings={patchSettings}
-      />
+      <I18nProvider language={settings.displayLanguage}>
+        <OnboardingFlow
+          settings={settings}
+          runtime={runtime}
+          onRefresh={refresh}
+          onPatchSettings={patchSettings}
+        />
+      </I18nProvider>
     );
   }
 
   return (
+    <I18nProvider language={settings.displayLanguage}>
+    <>
     <main className="voxly-shell">
       <aside className="voxly-sidebar">
         {/* Logo */}
@@ -271,10 +732,14 @@ export function SettingsApp() {
         </div>
 
         {/* Primary nav */}
-        <nav className="voxly-nav" aria-label="Main navigation">
+        <nav className="voxly-nav" aria-label={translate(settings.displayLanguage, "nav.main")}>
           {(["home", "insights", "dictionary"] as const).map((tab) => {
             const Icon = tab === "home" ? Home : tab === "insights" ? BarChart2 : BookOpen;
-            const label = tab === "home" ? "Home" : tab === "insights" ? "Insights" : "Dictionary";
+            const label = tab === "home"
+              ? translate(settings.displayLanguage, "nav.home")
+              : tab === "insights"
+                ? translate(settings.displayLanguage, "nav.insights")
+                : translate(settings.displayLanguage, "nav.dictionary");
             return (
               <button
                 key={tab}
@@ -295,49 +760,63 @@ export function SettingsApp() {
         {/* Spacer */}
         <div className="voxly-sidebar__spacer" />
 
-        {/* Upgrade card */}
+        {/* Upgrade card — premium */}
         <div className="voxly-upgrade-card">
-          <div className="voxly-upgrade-card__header">
-            <span>{formatPlanLabel(entitlement.billingPlan)}</span>
-          </div>
-          <div className="voxly-upgrade-card__usage">
-            <div className="voxly-upgrade-card__bar">
-              <div
-                className="voxly-upgrade-card__bar-fill"
-                style={{
-                  width: weeklyUsage
-                    ? `${Math.min(100, (weeklyUsage.wordsUsed / weeklyUsage.wordsLimit) * 100)}%`
-                    : "0%",
-                }}
-              />
+          {/* Top zone: title + stacked bars */}
+          <div className="voxly-upgrade-card__top">
+            <div className="voxly-upgrade-card__plan-row">
+              <span className="voxly-upgrade-card__plan-name">{formatPlanLabel(entitlement.billingPlan, (key, params) => translate(settings.displayLanguage, key, params))}</span>
             </div>
-            <p>
-              {weeklyUsage && weeklyUsage.wordsUsed > 0
-                ? `${weeklyUsage.wordsUsed.toLocaleString()} / ${weeklyUsage.wordsLimit.toLocaleString()} words this week`
-                : entitlement.isAuthenticated
-                  ? `Status: ${entitlement.billingStatus.replace("_", " ")}`
-                  : "Sign in to unlock paid features"}
-            </p>
+            <div className="voxly-upgrade-card__bars">
+              <div className="voxly-upgrade-card__bar voxly-upgrade-card__bar--1">
+                <div
+                  className="voxly-upgrade-card__bar-fill"
+                  style={{ width: `${usagePercent(weeklyUsage)}%` }}
+                />
+              </div>
+              <div className="voxly-upgrade-card__bar voxly-upgrade-card__bar--2" />
+              <div className="voxly-upgrade-card__bar voxly-upgrade-card__bar--3" />
+            </div>
           </div>
-          <button
-            type="button"
-            className="voxly-upgrade-btn"
-            onClick={() => window.electronAPI.openWebRoute("pricing")}
-          >
-            <Star size={14} />
-            {entitlement.billingPlan === "pro" ? "Manage plan" : "Upgrade to Pro"}
-          </button>
+          {/* Bottom zone: words used + description + button */}
+          <div className="voxly-upgrade-card__bottom">
+            {weeklyUsage && (
+              <p className="voxly-upgrade-card__words-used">
+                <BarChart2 size={12} />
+                {weeklyUsage.wordsUsed.toLocaleString()} words used this week
+              </p>
+            )}
+            {entitlement.billingPlan !== "pro" && weeklyUsage?.wordsLimit && (
+              <p className="voxly-upgrade-card__desc">
+                You&apos;re on the <strong>Free</strong> plan with{" "}
+                <strong>{weeklyUsage.wordsLimit.toLocaleString()} words</strong> per week. Upgrade for unlimited dictation.
+              </p>
+            )}
+            <TextButton
+              variant="glass"
+              className="voxly-upgrade-card__button"
+              onClick={() => {
+                setSettingsDefaultTab("account");
+                setActiveSection("settings");
+              }}
+            >
+              <Star size={14} />
+              {entitlement.billingPlan === "pro"
+                ? translate(settings.displayLanguage, "upgrade.managePlan")
+                : translate(settings.displayLanguage, "upgrade.upgradeToPro")}
+            </TextButton>
+          </div>
         </div>
 
         {/* Secondary links */}
-        <nav className="voxly-secondary-nav" aria-label="Secondary navigation">
+        <nav className="voxly-secondary-nav" aria-label={translate(settings.displayLanguage, "nav.secondary")}>
           <button
             type="button"
-            className="voxly-secondary-nav__item"
-            onClick={() => window.electronAPI.openWebRoute("signup")}
+            className="voxly-secondary-nav__item voxly-secondary-nav__item--referral"
+            onClick={() => setReferralOpen(true)}
           >
-            <Users size={16} />
-            <span>Invite a friend</span>
+            <Gift size={16} />
+            <span>{translate(settings.displayLanguage, "nav.referral")}</span>
           </button>
           <button
             type="button"
@@ -345,42 +824,62 @@ export function SettingsApp() {
             onClick={() => setActiveSection("settings")}
           >
             <Settings size={16} />
-            <span>Settings</span>
+            <span>{translate(settings.displayLanguage, "nav.settings")}</span>
           </button>
           <button
             type="button"
             className="voxly-secondary-nav__item"
-            onClick={() => window.electronAPI.openWebRoute("privacy")}
-          >
-            <Shield size={16} />
-            <span>Privacy</span>
-          </button>
-          <button
-            type="button"
-            className="voxly-secondary-nav__item"
-            onClick={() => window.electronAPI.openWebRoute("terms")}
+            onClick={() => setHelpFeedbackOpen(true)}
           >
             <HelpCircle size={16} />
-            <span>Terms</span>
+            <span>{translate(settings.displayLanguage, "nav.helpAndFeedback")}</span>
           </button>
         </nav>
 
         {/* Profile */}
-        <button
-          type="button"
-          className="voxly-profile"
-          onClick={() => window.electronAPI.openWebRoute("signin")}
-          aria-label="Account settings"
-        >
-          <div className="voxly-profile__avatar">
-            <UserCircle size={22} />
-          </div>
-          <div className="voxly-profile__info">
-            <span className="voxly-profile__name">{settings.agentName || "Your account"}</span>
-            <span className="voxly-profile__plan">{formatPlanLabel(entitlement.billingPlan)}</span>
-            <span className="voxly-profile__version">Version {runtime.appVersion}</span>
-          </div>
-        </button>
+        <div className="voxly-profile__wrapper">
+          <button
+            type="button"
+            className="voxly-profile"
+            onClick={() => setProfileMenuOpen((v) => !v)}
+            aria-label={translate(settings.displayLanguage, "account.settings")}
+          >
+            <div className="voxly-profile__avatar">
+              <UserCircle size={22} />
+            </div>
+            <div className="voxly-profile__info">
+              <span className="voxly-profile__name">{settings.agentName || translate(settings.displayLanguage, "account.yourAccount")}</span>
+              <span className="voxly-profile__plan">{formatPlanLabel(entitlement.billingPlan, (key, params) => translate(settings.displayLanguage, key, params))}</span>
+              <span className="voxly-profile__version">Version {runtime.appVersion}</span>
+            </div>
+          </button>
+          {profileMenuOpen && (
+            <div
+              className="voxly-profile__menu glass-panel-strong"
+              onMouseLeave={() => setProfileMenuOpen(false)}
+            >
+              {entitlement.isAuthenticated ? (
+                <button
+                  type="button"
+                  className="voxly-profile__menu-item"
+                  onClick={() => { void clearSession(); setProfileMenuOpen(false); }}
+                >
+                  <LogOut size={14} />
+                  <span>Sign out</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="voxly-profile__menu-item"
+                  onClick={() => { void window.electronAPI.openWebRoute("signin"); setProfileMenuOpen(false); }}
+                >
+                  <LogIn size={14} />
+                  <span>Sign in</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </aside>
 
       <section className="voxly-main">
@@ -398,8 +897,11 @@ export function SettingsApp() {
             }}
           />
         )}
+        {weeklyUsage?.isLimited && (weeklyUsage.isApproachingLimit || weeklyUsage.isLimitReached) && (
+          <UsageLimitBanner usage={weeklyUsage} />
+        )}
         {activeSection === "home" && (
-          <HomePage history={history} settings={settings} />
+          <HomePage history={history} settings={settings} weeklyUsage={weeklyUsage} />
         )}
         {activeSection === "insights" && (
           <InsightsPage history={history} />
@@ -414,8 +916,8 @@ export function SettingsApp() {
             entitlement={entitlement}
             updateStatus={updateStatus}
             updateBusy={updateBusy}
+            defaultTab={settingsDefaultTab}
             onPatchSettings={patchSettings}
-            onSaveSessionToken={saveSessionToken}
             onClearSession={clearSession}
             onStartCheckout={startCheckout}
             onRefreshEntitlement={() => syncEntitlement(true)}
@@ -425,6 +927,10 @@ export function SettingsApp() {
         )}
       </section>
     </main>
+    {referralOpen && <ReferralModal onClose={() => setReferralOpen(false)} isAuthenticated={entitlement.isAuthenticated} />}
+    {helpFeedbackOpen && <HelpFeedbackModal onClose={() => setHelpFeedbackOpen(false)} />}
+    </>
+    </I18nProvider>
   );
 }
 
@@ -435,6 +941,7 @@ function NeedsAttentionBanner({
   runtime: RuntimeStatus;
   onRefreshStatus: () => void;
 }) {
+  const t = useT();
   if (!runtime.pasteAttention) return null;
 
   const isAccessibilityIssue = runtime.pasteAttention.kind === "accessibility";
@@ -445,23 +952,23 @@ function NeedsAttentionBanner({
         <ShieldAlert size={18} />
       </div>
       <div className="needs-attention-banner__copy">
-        <strong>Needs attention</strong>
+        <strong>{t("status.needsAttention")}</strong>
         <p>{runtime.pasteAttention.summary}</p>
         <p className="needs-attention-banner__detail">{runtime.pasteAttention.detail}</p>
       </div>
       <div className="needs-attention-banner__actions">
         {isAccessibilityIssue ? (
           <TextButton variant="glass" onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-            Open Accessibility
+            {t("status.openAccessibility")}
           </TextButton>
         ) : (
           <TextButton variant="glass" onClick={() => window.electronAPI.openApplicationsFolder()}>
-            Open /Applications
+            {t("status.openApplications")}
           </TextButton>
         )}
         <TextButton variant="quiet" onClick={onRefreshStatus}>
           <RefreshCw size={15} />
-          Refresh Status
+          {t("status.refresh")}
         </TextButton>
       </div>
     </div>
@@ -479,6 +986,7 @@ function UpdateBanner({
   onCheck: () => void;
   onDownload: () => void;
 }) {
+  const t = useT();
   if (!status?.updateAvailable) return null;
 
   return (
@@ -487,18 +995,18 @@ function UpdateBanner({
         <Download size={18} />
       </div>
       <div className="app-update-banner__copy">
-        <strong>Dicta Fun {status.latestVersion} is ready</strong>
-        <p>You are running {status.currentVersion}.</p>
+        <strong>{t("update.ready", { version: status.latestVersion ?? "" })}</strong>
+        <p>{t("update.running", { version: status.currentVersion })}</p>
       </div>
       <div className="app-update-banner__actions">
         <TextButton variant="quiet" disabled={busy} onClick={onCheck}>
           <RefreshCw size={15} />
-          {busy ? "Checking..." : "Check"}
+          {busy ? t("update.checking") : t("update.check")}
         </TextButton>
         {status.downloadUrl && (
           <TextButton variant="primary" onClick={onDownload}>
             <Download size={15} />
-            Download Update
+            {t("update.download")}
           </TextButton>
         )}
       </div>
@@ -506,16 +1014,43 @@ function UpdateBanner({
   );
 }
 
+function UsageLimitBanner({ usage }: { usage: WeeklyUsageStatus }) {
+  const t = useT();
+  if (!usage.wordsLimit) return null;
+  const wordsRemaining = Math.max(0, usage.wordsRemaining ?? 0);
+  const title = usage.isLimitReached ? t("limit.reachedTitle") : t("limit.almostTitle");
+  const detail = usage.isLimitReached
+    ? t("limit.reachedDetail")
+    : t("limit.remainingDetail", { count: wordsRemaining.toLocaleString() });
+
+  return (
+    <div className="usage-limit-banner glass-panel-subtle" role="status" aria-live="polite">
+      <div className="usage-limit-banner__icon">
+        <Sparkles size={18} />
+      </div>
+      <div className="usage-limit-banner__copy">
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+      <TextButton variant="primary" onClick={() => window.electronAPI.openWebRoute("pricing")}>
+        <Star size={15} />
+        {t("overlay.upgrade")}
+      </TextButton>
+    </div>
+  );
+}
+
 // ── Hotkey display chip ───────────────────────────────────────────────────────
 
 function HotkeyChip({ hotkey }: { hotkey: string }) {
+  const t = useT();
   if (hotkey === "GLOBE" || hotkey === "Fn") {
     return (
       <div className="home-banner__shortcut-keys">
-        <span className="home-banner__shortcut-press">Press</span>
+        <span className="home-banner__shortcut-press">{t("shortcut.press")}</span>
         {/* FN-only key */}
         <span className="home-banner__key-chip home-banner__key-chip--fn">FN</span>
-        <span className="home-banner__shortcut-or">or</span>
+        <span className="home-banner__shortcut-or">{t("shortcut.or")}</span>
         {/* Combined fn + globe key matching physical macOS key layout */}
         <span className="home-banner__key-chip home-banner__key-chip--globe">
           <span className="home-banner__key-chip-fn">fn</span>
@@ -526,7 +1061,7 @@ function HotkeyChip({ hotkey }: { hotkey: string }) {
   }
   return (
     <div className="home-banner__shortcut-keys">
-      <span className="home-banner__shortcut-press">Press</span>
+      <span className="home-banner__shortcut-press">{t("shortcut.press")}</span>
       <span className="home-banner__key">{hotkey}</span>
     </div>
   );
@@ -534,36 +1069,51 @@ function HotkeyChip({ hotkey }: { hotkey: string }) {
 
 // ── Home Page ─────────────────────────────────────────────────────────────────
 
-function HomePage({ history, settings }: { history: TranscriptionRecord[]; settings: AppSettings }) {
+function HomePage({
+  history,
+  settings,
+  weeklyUsage,
+}: {
+  history: TranscriptionRecord[];
+  settings: AppSettings;
+  weeklyUsage: WeeklyUsageStatus | null;
+}) {
+  const t = useT();
   return (
     <div className="voxly-page">
       {/* Hero banner */}
-      <div className="home-banner">
+      <div className="home-banner" style={{ backgroundImage: `url(${heroBg})` }}>
         <div className="home-banner__copy">
-          <h1>Speak naturally.<br /><span>Dicta Fun writes it clearly.</span></h1>
-          <p>Press the shortcut or start a recording to turn your thoughts into polished text.</p>
-        </div>
-        <div className="home-banner__actions">
-          <TextButton variant="primary" onClick={() => window.electronAPI.openPanel()}>
-            <Mic size={17} />
-            Start speaking
-          </TextButton>
+          <h1>{t("home.titleLine1")}<br /><span>{t("home.titleLine2")}</span></h1>
+          <p>{t("home.subtitle")}</p>
         </div>
         <div className="home-banner__shortcut">
           <HotkeyChip hotkey={settings.hotkey} />
         </div>
       </div>
 
+      {weeklyUsage?.isLimited && weeklyUsage.wordsLimit !== null && (
+        <div className="home-usage glass-panel-subtle">
+          <div className="home-usage__copy">
+            <span>{t("home.freeWeeklyUsage")}</span>
+            <strong>{weeklyUsage.wordsUsed.toLocaleString()} / {weeklyUsage.wordsLimit.toLocaleString()} {t("home.words")}</strong>
+          </div>
+          <div className="home-usage__bar" aria-hidden="true">
+            <div className="home-usage__bar-fill" style={{ width: `${usagePercent(weeklyUsage)}%` }} />
+          </div>
+        </div>
+      )}
+
       {/* History list */}
       <div className="voxly-section-header">
-        <h2>Recent dictations</h2>
+        <h2>{t("home.recentDictations")}</h2>
       </div>
 
       {history.length === 0 ? (
         <div className="voxly-empty-state">
           <Mic size={36} />
-          <p>No dictations yet.</p>
-          <small>Your transcription history will appear here.</small>
+          <p>{t("home.noDictations")}</p>
+          <small>{t("home.historyHint")}</small>
         </div>
       ) : (
         <div className="home-history">
@@ -587,10 +1137,10 @@ function HomePage({ history, settings }: { history: TranscriptionRecord[]; setti
                   </time>
                   {isProcessed && (
                     <span className="home-history__badge home-history__badge--cleaned">
-                      Cleaned
+                      {t("home.cleaned")}
                     </span>
                   )}
-                  <span className="home-history__words">{wordCount} words</span>
+                  <span className="home-history__words">{wordCount} {t("home.words")}</span>
                 </div>
                 <p className="home-history__preview">{text}</p>
               </motion.article>
@@ -605,6 +1155,7 @@ function HomePage({ history, settings }: { history: TranscriptionRecord[]; setti
 // ── Insights Page ─────────────────────────────────────────────────────────────
 
 function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
+  const t = useT();
   const totalWords = history.reduce((sum, row) => {
     const text = row.processedText ?? row.originalText;
     return sum + text.trim().split(/\s+/).filter(Boolean).length;
@@ -617,43 +1168,43 @@ function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
   return (
     <div className="voxly-page">
       <div className="voxly-section-header">
-        <h2>Your insights</h2>
-        <p>A summary of how you've been using Dicta Fun.</p>
+        <h2>{t("insights.title")}</h2>
+        <p>{t("insights.subtitle")}</p>
       </div>
 
       {!hasData ? (
         <div className="voxly-empty-state">
           <BarChart2 size={36} />
-          <p>No data yet.</p>
-          <small>Start dictating to see your usage stats here.</small>
+          <p>{t("insights.noData")}</p>
+          <small>{t("insights.noDataHint")}</small>
         </div>
       ) : (
         <>
           <div className="insights-grid">
             <MetricCard
-              label="Total dictations"
+              label={t("insights.totalDictations")}
               value={String(totalDictations)}
-              detail="Sessions recorded"
+              detail={t("insights.sessionsRecorded")}
             />
             <MetricCard
-              label="Total words"
+              label={t("insights.totalWords")}
               value={totalWords >= 1000 ? `${(totalWords / 1000).toFixed(1)}k` : String(totalWords)}
-              detail="Words spoken"
+              detail={t("insights.wordsSpoken")}
             />
             <MetricCard
-              label="Cleaned"
+              label={t("insights.cleaned")}
               value={String(cleanedCount)}
-              detail="Dictations polished by AI"
+              detail={t("insights.cleanedDetail")}
             />
             <MetricCard
-              label="Time saved"
+              label={t("insights.timeSaved")}
               value={`~${Math.round(totalWords / 130)} min`}
-              detail="vs. typing at 40 wpm"
+              detail={t("insights.timeSavedDetail")}
             />
           </div>
 
           <div className="voxly-section-header" style={{ marginTop: 28 }}>
-            <h2>Recent activity</h2>
+            <h2>{t("insights.recentActivity")}</h2>
           </div>
           <div className="insights-activity">
             {history.slice(0, 7).map((row) => {
@@ -671,7 +1222,7 @@ function InsightsPage({ history }: { history: TranscriptionRecord[] }) {
                       style={{ width: `${Math.min(100, (words / Math.max(1, totalWords / history.length)) * 50)}%` }}
                     />
                   </div>
-                  <span className="insights-activity__words">{words} words</span>
+                  <span className="insights-activity__words">{words} {t("home.words")}</span>
                 </div>
               );
             })}
@@ -701,6 +1252,7 @@ function DictionaryPage({
   settings: AppSettings;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }) {
+  const t = useT();
   const [search, setSearch] = useState("");
   const [newWord, setNewWord] = useState("");
 
@@ -726,8 +1278,8 @@ function DictionaryPage({
           <BookOpen size={22} />
         </div>
         <div>
-          <h3>Dicta Fun learns the words you use.</h3>
-          <p>Add names, company terms, acronyms, and phrases so Dicta Fun writes them correctly every time.</p>
+          <h3>{t("dictionary.title")}</h3>
+          <p>{t("dictionary.subtitle")}</p>
         </div>
       </div>
 
@@ -738,8 +1290,8 @@ function DictionaryPage({
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search words…"
-            aria-label="Search dictionary"
+            placeholder={t("dictionary.search")}
+            aria-label={t("dictionary.search")}
           />
         </div>
         <div className="dict-add">
@@ -747,12 +1299,12 @@ function DictionaryPage({
             value={newWord}
             onChange={(e) => setNewWord(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && addWord()}
-            placeholder="Add a word or phrase…"
-            aria-label="New word"
+            placeholder={t("dictionary.addPlaceholder")}
+            aria-label={t("dictionary.addPlaceholder")}
           />
           <TextButton variant="primary" onClick={addWord} disabled={!newWord.trim()}>
             <Plus size={16} />
-            Add
+            {t("dictionary.add")}
           </TextButton>
         </div>
       </div>
@@ -761,11 +1313,11 @@ function DictionaryPage({
       {filtered.length === 0 ? (
         <div className="voxly-empty-state">
           <BookOpen size={36} />
-          <p>{words.length === 0 ? "No words yet." : "No matches."}</p>
+          <p>{words.length === 0 ? t("dictionary.noWords") : t("dictionary.noMatches")}</p>
           <small>
             {words.length === 0
-              ? "Add words Dicta Fun should recognise — names, brands, or technical terms."
-              : "Try a different search."}
+              ? t("dictionary.emptyHint")
+              : t("dictionary.searchHint")}
           </small>
         </div>
       ) : (
@@ -789,7 +1341,38 @@ function DictionaryPage({
   );
 }
 
-// ── Settings Page (simplified) ────────────────────────────────────────────────
+// ── Settings Page — Apple HIG tabbed layout ───────────────────────────────────
+
+type SettingsTabId = "general" | "account" | "privacy";
+
+function SettingsTabBtn({
+  id,
+  label,
+  icon: Icon,
+  active,
+  onClick,
+}: {
+  id: SettingsTabId;
+  label: string;
+  icon: LucideIcon;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={`sp-tab-${id}`}
+      aria-selected={active}
+      aria-controls={`sp-panel-${id}`}
+      className={cn("sp-tab", active && "is-active")}
+      onClick={onClick}
+    >
+      <Icon size={20} />
+      <span>{label}</span>
+    </button>
+  );
+}
 
 function SettingsPage({
   settings,
@@ -797,8 +1380,8 @@ function SettingsPage({
   entitlement,
   updateStatus,
   updateBusy,
+  defaultTab,
   onPatchSettings,
-  onSaveSessionToken,
   onClearSession,
   onStartCheckout,
   onRefreshEntitlement,
@@ -810,46 +1393,27 @@ function SettingsPage({
   entitlement: EntitlementStatus;
   updateStatus: DesktopUpdateStatus | null;
   updateBusy: boolean;
+  defaultTab?: SettingsTabId;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
-  onSaveSessionToken: (token: string) => Promise<void>;
   onClearSession: () => Promise<void>;
   onStartCheckout: (plan: PaidPlan, interval: BillingInterval) => Promise<unknown>;
   onRefreshEntitlement: () => Promise<void>;
   onCheckUpdates: () => Promise<void>;
   onOpenUpdate: () => Promise<void>;
 }) {
-  const [sessionToken, setSessionToken] = useState("");
-  const [selectedPlan, setSelectedPlan] = useState<PaidPlan>("starter");
-  const [selectedInterval, setSelectedInterval] = useState<BillingInterval>("monthly");
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(defaultTab ?? "general");
+  const [billingInterval, setBillingInterval] = useState<BillingInterval>("yearly");
   const [accountBusy, setAccountBusy] = useState(false);
-  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [checkoutBusy, setCheckoutBusy] = useState<PaidPlan | null>(null);
   const [accountMessage, setAccountMessage] = useState("");
-
-  async function handleSaveSessionToken() {
-    if (!sessionToken.trim()) {
-      setAccountMessage("Paste an access token first.");
-      return;
-    }
-
-    setAccountBusy(true);
-    setAccountMessage("");
-    try {
-      await onSaveSessionToken(sessionToken);
-      setSessionToken("");
-      setAccountMessage("Account connected. Plan status updated.");
-    } catch (error) {
-      setAccountMessage(error instanceof Error ? error.message : "Failed to save token.");
-    } finally {
-      setAccountBusy(false);
-    }
-  }
+  const t = useT();
 
   async function handleSignOut() {
     setAccountBusy(true);
     setAccountMessage("");
     try {
       await onClearSession();
-      setAccountMessage("Signed out from this desktop app.");
+      setAccountMessage("Signed out.");
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "Failed to sign out.");
     } finally {
@@ -870,194 +1434,390 @@ function SettingsPage({
     }
   }
 
-  async function handleStartCheckout() {
-    setCheckoutBusy(true);
+  async function handleStartCheckout(plan: PaidPlan) {
+    setCheckoutBusy(plan);
     setAccountMessage("");
     try {
-      await onStartCheckout(selectedPlan, selectedInterval);
+      await onStartCheckout(plan, billingInterval);
       setAccountMessage("Checkout opened in your browser. Return here after payment to refresh.");
     } catch (error) {
       setAccountMessage(error instanceof Error ? error.message : "Unable to start checkout.");
     } finally {
-      setCheckoutBusy(false);
+      setCheckoutBusy(null);
     }
   }
 
   return (
     <div className="voxly-page">
-      <div className="voxly-section-header">
-        <h2>Settings</h2>
-        <p>Manage your Dicta Fun preferences.</p>
+      {/* Apple HIG toolbar tab bar */}
+      <div className="sp-toolbar" role="tablist" aria-label="Settings sections">
+        <SettingsTabBtn id="general" label="General" icon={Settings} active={activeTab === "general"} onClick={() => setActiveTab("general")} />
+        <SettingsTabBtn id="account" label="Account" icon={CreditCard} active={activeTab === "account"} onClick={() => setActiveTab("account")} />
+        <SettingsTabBtn id="privacy" label="Privacy" icon={Shield} active={activeTab === "privacy"} onClick={() => setActiveTab("privacy")} />
       </div>
 
-      <div className="settings-rows">
-        <div className="settings-row">
-          <div>
-            <h3>Your name</h3>
-            <p>How Dicta Fun refers to you when cleaning up dictations.</p>
+      {/* General ── name, hotkey, mode, cleanup, updates */}
+      {activeTab === "general" && (
+        <div id="sp-panel-general" role="tabpanel" aria-labelledby="sp-tab-general" className="settings-rows">
+          <div className="settings-row">
+            <div>
+              <h3>Your name</h3>
+              <p>How Dicta Fun refers to you when cleaning up dictations.</p>
+            </div>
+            <input
+              className="settings-input"
+              value={settings.agentName}
+              onChange={(e) => void onPatchSettings({ agentName: e.target.value })}
+              placeholder="Your name"
+            />
           </div>
-          <input
-            className="settings-input"
-            value={settings.agentName}
-            onChange={(e) => void onPatchSettings({ agentName: e.target.value })}
-            placeholder="Your name"
-          />
-        </div>
 
-        <div className="settings-row">
-          <div>
-            <h3>Hotkey</h3>
-            <p>Global shortcut to start and stop dictation.</p>
+          <div className="settings-row">
+            <div>
+              <h3>Hotkey</h3>
+              <p>Global shortcut to start and stop dictation.</p>
+            </div>
+            <div className="settings-hotkey-display">
+              <HotkeyChip hotkey={settings.hotkey} />
+            </div>
           </div>
-          <div className="settings-hotkey-display">
-            <HotkeyChip hotkey={settings.hotkey} />
-          </div>
-        </div>
 
-        <div className="settings-row">
-          <div>
-            <h3>App version</h3>
-            <p>{formatUpdateStatus(updateStatus, runtime.appVersion)}</p>
+          <div className="settings-row settings-row--stacked">
+            <div>
+              <h3>Hotkey mode</h3>
+              <p>Choose how Dicta Fun starts and stops recording.</p>
+            </div>
+            <div className="settings-mode-options" role="radiogroup" aria-label="Hotkey mode">
+              {hotkeyModeOptions(t).map((option) => {
+                const Icon = option.icon;
+                return (
+                  <label
+                    key={option.value}
+                    className={cn("settings-mode-option", settings.mode === option.value && "settings-mode-option--active")}
+                  >
+                    <input
+                      type="radio"
+                      name="hotkey-mode"
+                      value={option.value}
+                      checked={settings.mode === option.value}
+                      onChange={() => void onPatchSettings({ mode: option.value })}
+                    />
+                    <Icon size={17} />
+                    <span>{option.label}</span>
+                    <small>{option.description}</small>
+                  </label>
+                );
+              })}
+            </div>
           </div>
-          <div className="settings-row__actions">
-            <span className="settings-version-pill">v{runtime.appVersion}</span>
-            <TextButton disabled={updateBusy} onClick={() => void onCheckUpdates()}>
-              <RefreshCw size={16} />
-              {updateBusy ? "Checking..." : "Check Updates"}
-            </TextButton>
-            {updateStatus?.updateAvailable && updateStatus.downloadUrl && (
-              <TextButton variant="primary" onClick={() => void onOpenUpdate()}>
-                <Download size={16} />
-                Download Update
+
+          <div className="settings-row">
+            <div>
+              <h3>Text cleanup</h3>
+              <p>Automatically polish punctuation and casing after you dictate.</p>
+            </div>
+            <label className="settings-toggle" aria-label="Toggle text cleanup">
+              <input
+                type="checkbox"
+                checked={settings.cleanupEnabled}
+                disabled={!entitlement.canUseCleanup}
+                onChange={(e) => void onPatchSettings({ cleanupEnabled: e.target.checked })}
+              />
+              <span className="settings-toggle__track" />
+            </label>
+          </div>
+
+          <div className="settings-row">
+            <div>
+              <h3>App version</h3>
+              <p>{formatUpdateStatus(updateStatus, runtime.appVersion, t)}</p>
+            </div>
+            <div className="settings-row__actions">
+              <span className="settings-version-pill">v{runtime.appVersion}</span>
+              <TextButton disabled={updateBusy} onClick={() => void onCheckUpdates()}>
+                <RefreshCw size={16} />
+                {updateBusy ? "Checking..." : "Check for Updates"}
               </TextButton>
-            )}
+              {updateStatus?.updateAvailable && updateStatus.downloadUrl && (
+                <TextButton variant="primary" onClick={() => void onOpenUpdate()}>
+                  <Download size={16} />
+                  Download Update
+                </TextButton>
+              )}
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <div>
+              <h3>Langue de l&apos;interface / Display language</h3>
+              <p>Choose the language used throughout the app.</p>
+            </div>
+            <select
+              className="settings-select"
+              value={settings.displayLanguage}
+              onChange={(e) => void onPatchSettings({ displayLanguage: e.target.value as AppSettings["displayLanguage"] })}
+            >
+              {displayLanguageOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
           </div>
         </div>
+      )}
 
-        <div className="settings-row settings-row--stacked">
-          <div>
-            <h3>Hotkey mode</h3>
-            <p>Choose how Dicta Fun starts and stops recording from the global shortcut.</p>
+      {/* Account ── plan status + pricing cards */}
+      {activeTab === "account" && (
+        <div id="sp-panel-account" role="tabpanel" aria-labelledby="sp-tab-account">
+          {/* Current plan status bar */}
+          <div className="account-status">
+            <div className="account-status__avatar">
+              <UserCircle size={24} />
+            </div>
+            <div className="account-status__info">
+              <span className="account-status__name">
+                {settings.agentName || "Your account"}
+              </span>
+              <span className="account-status__plan">
+                {formatPlanLabel(entitlement.billingPlan, t)}
+                {entitlement.billingStatus !== "unknown" && ` · ${entitlement.billingStatus.replace(/_/g, " ")}`}
+              </span>
+            </div>
+            <div className="account-status__actions">
+              <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
+                <RefreshCw size={15} />
+                Refresh
+              </TextButton>
+              {entitlement.isAuthenticated ? (
+                <TextButton variant="quiet" disabled={accountBusy} onClick={() => void handleSignOut()}>
+                  <LogOut size={15} />
+                  Sign Out
+                </TextButton>
+              ) : (
+                <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("signin")}>
+                  <LogIn size={15} />
+                  Sign In
+                </TextButton>
+              )}
+            </div>
           </div>
-          <div className="settings-mode-options" role="radiogroup" aria-label="Hotkey mode">
-            {hotkeyModeOptions.map((option) => {
-              const Icon = option.icon;
-              return (
-                <label
-                  key={option.value}
-                  className={cn("settings-mode-option", settings.mode === option.value && "settings-mode-option--active")}
+
+          {/* Billing interval toggle */}
+          <div className="pricing-billing-toggle">
+            <span className={cn("pricing-billing-toggle__label", billingInterval === "monthly" && "pricing-billing-toggle__label--active")}>
+              Monthly
+            </span>
+            <button
+              type="button"
+              className="pricing-billing-toggle__switch"
+              data-state={billingInterval}
+              aria-label="Toggle billing interval"
+              onClick={() => setBillingInterval(billingInterval === "monthly" ? "yearly" : "monthly")}
+            />
+            <span className={cn("pricing-billing-toggle__label", billingInterval === "yearly" && "pricing-billing-toggle__label--active")}>
+              Annually
+            </span>
+          </div>
+
+          {/* Pricing cards */}
+          <div className="pricing-grid">
+            {/* Free */}
+            <article className="pricing-card pricing-card--cta-dark">
+              <div className="pricing-card__head">
+                <div className="pricing-card__eyebrow">
+                  <span className="pricing-card__label">Starter</span>
+                  {entitlement.billingPlan === "free" && (
+                    <span className="pricing-card__badge">Current plan</span>
+                  )}
+                </div>
+                <h3 className="pricing-card__title">Free</h3>
+                <div className="pricing-card__price-row">
+                  <span className="pricing-card__price-current">$0</span>
+                </div>
+                <p className="pricing-card__desc">Full DictaFun experience.</p>
+              </div>
+              <div className="pricing-card__cta">
+                <TextButton
+                  disabled={entitlement.billingPlan === "free"}
+                  onClick={() => window.electronAPI.openWebRoute("pricing")}
                 >
-                  <input
-                    type="radio"
-                    name="hotkey-mode"
-                    value={option.value}
-                    checked={settings.mode === option.value}
-                    onChange={() => void onPatchSettings({ mode: option.value })}
-                  />
-                  <Icon size={17} />
-                  <span>{option.label}</span>
-                  <small>{option.description}</small>
-                </label>
-              );
-            })}
-          </div>
-        </div>
+                  {entitlement.billingPlan === "free" ? "Current plan" : "Download"}
+                </TextButton>
+              </div>
+              <hr className="pricing-card__divider" />
+              <div className="pricing-card__features">
+                <p className="pricing-card__features-label">Included features</p>
+                <ul className="pricing-card__feature-list">
+                  {[
+                    "Full DictaFun experience",
+                    "Cloud transcription",
+                    "AI cleanup",
+                    "2,000 words/week",
+                    "No credit card required",
+                  ].map((f) => (
+                    <li key={f} className="pricing-card__feature">
+                      <Check size={14} />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </article>
 
-        <div className="settings-row">
-          <div>
-            <h3>Text cleanup</h3>
-            <p>Automatically polish punctuation and casing after you dictate.</p>
-          </div>
-          <label className="settings-toggle" aria-label="Toggle text cleanup">
-            <input
-              type="checkbox"
-              checked={settings.cleanupEnabled}
-              disabled={!entitlement.canUseCleanup}
-              onChange={(e) => void onPatchSettings({ cleanupEnabled: e.target.checked })}
-            />
-            <span className="settings-toggle__track" />
-          </label>
-        </div>
+            {/* Starter / Plus — featured */}
+            <article className="pricing-card pricing-card--featured">
+              <div className="pricing-card__head">
+                <div className="pricing-card__eyebrow">
+                  <span className="pricing-card__label">Best for daily writing</span>
+                  <span className="pricing-card__badge pricing-card__badge--featured">
+                    {entitlement.billingPlan === "starter" ? "Current plan" : "Launch plan"}
+                  </span>
+                </div>
+                <h3 className="pricing-card__title">Dicta Fun Plus</h3>
+                <div className="pricing-card__price-row">
+                  <span className="pricing-card__price-current">
+                    {billingInterval === "yearly" ? "$7" : "$8"}
+                  </span>
+                  <span className="pricing-card__price-period">/ month</span>
+                </div>
+                <p className="pricing-card__desc">For everyday users who want to speak instead of type.</p>
+              </div>
+              <div className="pricing-card__cta">
+                <TextButton
+                  variant="primary"
+                  disabled={checkoutBusy === "starter" || entitlement.billingPlan === "starter"}
+                  onClick={() => void handleStartCheckout("starter")}
+                >
+                  {entitlement.billingPlan === "starter"
+                    ? "Current plan"
+                    : checkoutBusy === "starter"
+                    ? "Opening checkout…"
+                    : "Get Plus"}
+                </TextButton>
+              </div>
+              <hr className="pricing-card__divider" />
+              <div className="pricing-card__features">
+                <p className="pricing-card__features-label">Everything in Free, plus…</p>
+                <ul className="pricing-card__feature-list">
+                  {["Higher monthly usage", "Custom cleanup instructions", "Custom dictionary & templates", "Faster processing"].map((f) => (
+                    <li key={f} className="pricing-card__feature">
+                      <Check size={14} />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </article>
 
-        <div className="settings-row settings-row--stacked">
-          <div>
-            <h3>Account & billing</h3>
-            <p>
-              Manage subscription directly in the desktop app. Current plan: {formatPlanLabel(entitlement.billingPlan)}
-              {` (${entitlement.billingStatus.replace("_", " ")}).`}
-            </p>
+            {/* Pro */}
+            <article className="pricing-card pricing-card--cta-dark">
+              <div className="pricing-card__head">
+                <div className="pricing-card__eyebrow">
+                  <span className="pricing-card__label">For professionals</span>
+                  {entitlement.billingPlan === "pro" && (
+                    <span className="pricing-card__badge">Current plan</span>
+                  )}
+                </div>
+                <h3 className="pricing-card__title">Dicta Fun Pro</h3>
+                <div className="pricing-card__price-row">
+                  {billingInterval === "yearly" && (
+                    <span className="pricing-card__price-old">$45</span>
+                  )}
+                  <span className="pricing-card__price-current">
+                    {billingInterval === "yearly" ? "$15" : "$45"}
+                  </span>
+                  <span className="pricing-card__price-period">/ month</span>
+                </div>
+                <p className="pricing-card__desc">For heavy users, creators, founders, students, and professionals.</p>
+              </div>
+              <div className="pricing-card__cta">
+                <TextButton
+                  disabled={checkoutBusy === "pro" || entitlement.billingPlan === "pro"}
+                  onClick={() => void handleStartCheckout("pro")}
+                >
+                  {entitlement.billingPlan === "pro"
+                    ? "Current plan"
+                    : checkoutBusy === "pro"
+                    ? "Opening checkout…"
+                    : "Get Pro"}
+                </TextButton>
+              </div>
+              <hr className="pricing-card__divider" />
+              <div className="pricing-card__features">
+                <p className="pricing-card__features-label">Everything in Free, plus…</p>
+                <ul className="pricing-card__feature-list">
+                  {["Unlimited voice writing", "Advanced rewrites & modes", "File/audio upload transcription", "Priority processing & support"].map((f) => (
+                    <li key={f} className="pricing-card__feature">
+                      <Check size={14} />
+                      {f}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </article>
           </div>
-          <div className="settings-row__actions">
-            <input
-              className="settings-input settings-input--mono"
-              value={sessionToken}
-              onChange={(e) => setSessionToken(e.target.value)}
-              placeholder="Paste Supabase access token"
-              aria-label="Session access token"
-            />
-            <TextButton variant="primary" disabled={accountBusy || !sessionToken.trim()} onClick={() => void handleSaveSessionToken()}>
-              <LogIn size={16} />
-              Connect Account
-            </TextButton>
-            <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
-              <RefreshCw size={16} />
-              Refresh Plan
-            </TextButton>
-            <TextButton variant="quiet" disabled={accountBusy || !entitlement.isAuthenticated} onClick={() => void handleSignOut()}>
-              <LogOut size={16} />
-              Sign Out
-            </TextButton>
-          </div>
-          <div className="settings-row__actions">
-            <select
-              className="settings-input"
-              value={selectedPlan}
-              onChange={(e) => setSelectedPlan(e.target.value as PaidPlan)}
-              aria-label="Checkout plan"
-            >
-              <option value="starter">Starter</option>
-              <option value="pro">Pro</option>
-            </select>
-            <select
-              className="settings-input"
-              value={selectedInterval}
-              onChange={(e) => setSelectedInterval(e.target.value as BillingInterval)}
-              aria-label="Checkout interval"
-            >
-              <option value="monthly">Monthly</option>
-              <option value="yearly">Yearly</option>
-            </select>
-            <TextButton
-              variant="primary"
-              disabled={checkoutBusy || !entitlement.isAuthenticated}
-              onClick={() => void handleStartCheckout()}
-            >
-              <CreditCard size={16} />
-              {checkoutBusy ? "Opening Checkout..." : "Start Checkout"}
-            </TextButton>
-          </div>
-          {!!accountMessage && <p>{accountMessage}</p>}
-        </div>
 
-        <div className="settings-row">
-          <div>
-            <h3>Permissions</h3>
-            <p>Microphone{runtime.platform === "darwin" ? " and accessibility" : ""} access required for dictation.</p>
-          </div>
-          <div className="settings-row__actions">
-            <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
-              <Mic size={16} />
-              Microphone…
-            </TextButton>
-            {runtime.platform === "darwin" && (
-              <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
-                <ShieldAlert size={16} />
-                Accessibility…
+          {!!accountMessage && <p className="account-message">{accountMessage}</p>}
+        </div>
+      )}
+
+      {/* Privacy ── permissions */}
+      {activeTab === "privacy" && (
+        <div id="sp-panel-privacy" role="tabpanel" aria-labelledby="sp-tab-privacy" className="settings-rows">
+          <div className="settings-row">
+            <div>
+              <h3>Microphone</h3>
+              <p>Required to capture your voice for dictation.</p>
+            </div>
+            <div className="settings-row__actions">
+              <TextButton onClick={() => window.electronAPI.openPermissionSettings("microphone")}>
+                <Mic size={16} />
+                Open Microphone Settings…
               </TextButton>
-            )}
+            </div>
+          </div>
+
+          {runtime.platform === "darwin" && (
+            <div className="settings-row">
+              <div>
+                <h3>Accessibility</h3>
+                <p>Allows Dicta Fun to paste transcribed text at your cursor position.</p>
+              </div>
+              <div className="settings-row__actions">
+                <TextButton onClick={() => window.electronAPI.openPermissionSettings("accessibility")}>
+                  <ShieldAlert size={16} />
+                  Open Accessibility Settings…
+                </TextButton>
+              </div>
+            </div>
+          )}
+
+          <div className="settings-row">
+            <div>
+              <h3>Privacy policy</h3>
+              <p>Review how Dicta Fun handles your data.</p>
+            </div>
+            <div className="settings-row__actions">
+              <TextButton variant="quiet" onClick={() => window.electronAPI.openWebRoute("privacy")}>
+                <Globe size={16} />
+                View Privacy Policy
+              </TextButton>
+            </div>
+          </div>
+
+          <div className="settings-row">
+            <div>
+              <h3>Terms of service</h3>
+              <p>Read the terms that govern your use of Dicta Fun.</p>
+            </div>
+            <div className="settings-row__actions">
+              <TextButton variant="quiet" onClick={() => window.electronAPI.openWebRoute("terms")}>
+                <Globe size={16} />
+                View Terms
+              </TextButton>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -1067,7 +1827,7 @@ const onboardingSteps: Array<{
   title: string;
   eyebrow: string;
   summary: string;
-  icon: LucideIcon;
+  icon?: LucideIcon;
 }> = [
   {
     id: "welcome",
@@ -1075,6 +1835,13 @@ const onboardingSteps: Array<{
     title: "Make dictation feel native.",
     summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
     icon: MousePointerClick,
+  },
+  {
+    id: "plan",
+    eyebrow: "Free Plan",
+    title: "Start with 2,000 free words each week.",
+    summary: "Free dictation is capped weekly. Dicta Fun will warn you as you approach the limit and point you to upgrade when you need more.",
+    icon: Star,
   },
   {
     id: "permissions",
@@ -1087,21 +1854,13 @@ const onboardingSteps: Array<{
     id: "hotkey",
     eyebrow: "Shortcut",
     title: "Learn your shortcut.",
-    summary: "Try both modes — tap once to start and again to stop, or hold while speaking. Then choose the one that fits you best.",
-    icon: Zap,
-  },
-  {
-    id: "test",
-    eyebrow: "Try It",
-    title: "Speak and see it typed.",
-    summary: "Record a short clip — Dicta Fun will transcribe it here so you know your microphone and model are working before you start.",
-    icon: Mic,
+    summary: "First hold the shortcut while speaking, then try pressing once to start and once to stop. Each test transcribes here.",
   },
   {
     id: "finish",
     eyebrow: "Ready",
-    title: "Try it from anywhere.",
-    summary: "Open the overlay, press your shortcut, speak, and Dicta Fun will paste the transcript where your cursor is focused.",
+    title: "Ready from anywhere.",
+    summary: "Use the shortcut you tested and Dicta Fun will paste the transcript where your cursor is focused.",
     icon: Check,
   },
 ];
@@ -1119,10 +1878,12 @@ function OnboardingFlow({
 }) {
   const [stepIndex, setStepIndex] = useState(0);
   const [micCheck, setMicCheck] = useState<"idle" | "checking" | "granted" | "denied">("idle");
+  const [shortcutComplete, setShortcutComplete] = useState(false);
   const step = onboardingSteps[stepIndex];
   const StepIcon = step.icon;
   const isLast = stepIndex === onboardingSteps.length - 1;
   const canGoBack = stepIndex > 0;
+  const canContinue = step.id !== "hotkey" || shortcutComplete;
 
   async function completeOnboarding() {
     log.info("Completing onboarding");
@@ -1164,16 +1925,20 @@ function OnboardingFlow({
               </li>
             ))}
           </ol>
-          <TextButton variant="quiet" onClick={completeOnboarding}>
-            Skip Setup
-          </TextButton>
+          {canSkipOnboarding && (
+            <TextButton variant="quiet" onClick={completeOnboarding}>
+              Skip Setup
+            </TextButton>
+          )}
         </aside>
 
-        <section className="onboarding-content" aria-labelledby="onboarding-title">
+        <section className="onboarding-content" data-step={step.id} aria-labelledby="onboarding-title">
           <div className="onboarding-copy">
-            <div className="onboarding-icon">
-              <StepIcon size={26} />
-            </div>
+            {StepIcon && (
+              <div className="onboarding-icon">
+                <StepIcon size={26} />
+              </div>
+            )}
             <p className="onboarding-eyebrow">{step.eyebrow}</p>
             <h1 id="onboarding-title">{step.title}</h1>
             <p>{step.summary}</p>
@@ -1181,13 +1946,18 @@ function OnboardingFlow({
 
           <div className="onboarding-detail">
             {step.id === "welcome" && <WelcomeStep settings={settings} runtime={runtime} />}
+            {step.id === "plan" && <PlanStep />}
             {step.id === "permissions" && (
               <PermissionsStep runtime={runtime} micCheck={micCheck} onCheckMicrophone={checkMicrophone} onRefresh={onRefresh} />
             )}
             {step.id === "hotkey" && (
-              <HotkeyTeachStep settings={settings} onPatchSettings={onPatchSettings} />
+              <HotkeyTeachStep
+                settings={settings}
+                runtime={runtime}
+                onCompletionChange={setShortcutComplete}
+                onPatchSettings={onPatchSettings}
+              />
             )}
-            {step.id === "test" && <DictationTestStep settings={settings} />}
             {step.id === "finish" && <FinishStep settings={settings} runtime={runtime} />}
           </div>
 
@@ -1198,7 +1968,9 @@ function OnboardingFlow({
             </TextButton>
             <TextButton
               variant="primary"
+              disabled={!canContinue}
               onClick={() => {
+                if (!canContinue) return;
                 if (isLast) {
                   void completeOnboarding();
                   return;
@@ -1211,6 +1983,11 @@ function OnboardingFlow({
                 <>
                   <Check size={17} />
                   Start Using Dicta Fun
+                </>
+              ) : step.id === "hotkey" && !shortcutComplete ? (
+                <>
+                  Complete Both Tests
+                  <ArrowRight size={17} />
                 </>
               ) : (
                 <>
@@ -1245,6 +2022,34 @@ function WelcomeStep({ settings, runtime }: { settings: AppSettings; runtime: Ru
         <ChevronRight size={15} />
         <span>Paste</span>
       </div>
+    </div>
+  );
+}
+
+function PlanStep() {
+  return (
+    <div className="plan-preview glass-panel-subtle">
+      <div className="plan-preview__header">
+        <span>Free weekly words</span>
+        <strong>2,000</strong>
+      </div>
+      <div className="plan-preview__bar" aria-hidden="true">
+        <div className="plan-preview__bar-fill" />
+      </div>
+      <div className="plan-preview__rows">
+        <div>
+          <CheckCircle2 size={16} />
+          <span>Warnings near 80% usage</span>
+        </div>
+        <div>
+          <CheckCircle2 size={16} />
+          <span>Upgrade CTA when you need more room</span>
+        </div>
+      </div>
+      <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("pricing")}>
+        <Star size={17} />
+        View Upgrade Options
+      </TextButton>
     </div>
   );
 }
@@ -1304,82 +2109,251 @@ function PermissionsStep({
 
 function HotkeyTeachStep({
   settings,
+  runtime,
+  onCompletionChange,
   onPatchSettings,
 }: {
   settings: AppSettings;
+  runtime: RuntimeStatus;
+  onCompletionChange: (complete: boolean) => void;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }) {
-  const [tapDone, setTapDone] = useState(false);
-  const [holdDone, setHoldDone] = useState(false);
-  const [tapState, setTapState] = useState<"idle" | "recording">("idle");
-  const [holdState, setHoldState] = useState<"idle" | "recording">("idle");
+  type TrialId = "push" | "tap";
+  type TrialState = {
+    status: "waiting" | "recording" | "processing" | "done" | "error";
+    transcript: string;
+    error: string;
+  };
 
-  function handleTapClick() {
-    if (tapState === "idle") {
-      setTapState("recording");
-    } else {
-      setTapState("idle");
-      setTapDone(true);
+  const [activeTrial, setActiveTrial] = useState<TrialId>("push");
+  const [trialStates, setTrialStates] = useState<Record<TrialId, TrialState>>({
+    push: { status: "waiting", transcript: "", error: "" },
+    tap: { status: "waiting", transcript: "", error: "" },
+  });
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const activeTrialRef = useRef<TrialId>("push");
+  const trialStatesRef = useRef(trialStates);
+  const recorderTrialRef = useRef<TrialId | null>(null);
+  const startInFlightRef = useRef(false);
+  const stopRequestedDuringStartRef = useRef(false);
+  const pushDone = trialStates.push.status === "done";
+  const tapDone = trialStates.tap.status === "done";
+  const bothDone = pushDone && tapDone;
+  const shortcutLabel = runtime.platform === "darwin" ? "Fn / Globe" : settings.hotkey;
+  const t = useT();
+
+  useEffect(() => {
+    onCompletionChange(bothDone);
+  }, [bothDone, onCompletionChange]);
+
+  useEffect(() => {
+    activeTrialRef.current = activeTrial;
+  }, [activeTrial]);
+
+  useEffect(() => {
+    trialStatesRef.current = trialStates;
+  }, [trialStates]);
+
+  useEffect(() => {
+    if (bothDone) return;
+    const desiredMode: AppSettings["mode"] = activeTrial === "push" ? "push-to-talk" : "tap-to-talk";
+    if (settings.mode !== desiredMode) {
+      void onPatchSettings({ mode: desiredMode });
     }
-  }
+  }, [activeTrial, bothDone, onPatchSettings, settings.mode]);
 
-  function handleHoldMouseDown() {
-    setHoldState("recording");
-  }
+  const updateTrial = useCallback((trial: TrialId, patch: Partial<TrialState>) => {
+    setTrialStates((current) => ({
+      ...current,
+      [trial]: {
+        ...current[trial],
+        ...patch,
+      },
+    }));
+  }, []);
 
-  function handleHoldMouseUp() {
-    setHoldState("idle");
-    setHoldDone(true);
-  }
+  const startTrialRecording = useCallback(async (trial: TrialId) => {
+    const currentState = trialStatesRef.current[trial].status;
+    if (
+      startInFlightRef.current ||
+      recorderRef.current !== null ||
+      currentState === "recording" ||
+      currentState === "processing" ||
+      currentState === "done"
+    ) {
+      return;
+    }
 
-  const bothDone = tapDone && holdDone;
+    log.info("Shortcut onboarding test: starting recording", { trial });
+    startInFlightRef.current = true;
+    stopRequestedDuringStartRef.current = false;
+    chunksRef.current = [];
+    recorderTrialRef.current = trial;
+    updateTrial(trial, { status: "recording", transcript: "", error: "" });
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+      streamRef.current = stream;
+      const mimeType = preferredRecordingMimeType();
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        audioBitsPerSecond: SHORTCUT_TEST_AUDIO_BITS_PER_SECOND,
+      });
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunksRef.current.push(event.data);
+      };
+      recorder.onstop = async () => {
+        const stoppedTrial = recorderTrialRef.current ?? trial;
+        const chunks = chunksRef.current;
+        recorderRef.current = null;
+        recorderTrialRef.current = null;
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        updateTrial(stoppedTrial, { status: "processing", error: "" });
+
+        try {
+          const blob = new Blob(chunks, { type: preferredRecordingMimeType() });
+          const wavBuffer = await recordingBlobToWav(blob);
+          const audioChunks = await Promise.all(
+            chunks.map(async (chunk) => ({
+              buffer: await chunk.arrayBuffer(),
+              mimeType: chunk.type || blob.type || "audio/webm",
+            })),
+          );
+          const result = await window.electronAPI.transcribeLocalWhisper(wavBuffer, {
+            cleanupEnabled: false,
+            saveToHistory: false,
+            selectedModel: settings.selectedModel,
+          }, audioChunks);
+
+          if (!result.text.trim()) {
+            updateTrial(stoppedTrial, {
+              status: "error",
+              transcript: "",
+              error: "No speech detected. Press the shortcut and try again.",
+            });
+            return;
+          }
+
+          updateTrial(stoppedTrial, { status: "done", transcript: result.text, error: "" });
+          if (stoppedTrial === "push") {
+            setActiveTrial("tap");
+          }
+        } catch (err) {
+          log.error("Shortcut onboarding test transcription failed", err);
+          updateTrial(stoppedTrial, {
+            status: "error",
+            transcript: "",
+            error: err instanceof Error ? err.message : "Transcription failed. Try again.",
+          });
+        }
+      };
+      recorder.start();
+      startInFlightRef.current = false;
+      if (stopRequestedDuringStartRef.current) {
+        stopRequestedDuringStartRef.current = false;
+        recorder.stop();
+      }
+    } catch (err) {
+      startInFlightRef.current = false;
+      stopRequestedDuringStartRef.current = false;
+      log.warn("Shortcut onboarding test mic access failed", err);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      recorderRef.current = null;
+      recorderTrialRef.current = null;
+      updateTrial(trial, {
+        status: "error",
+        transcript: "",
+        error: "Could not access microphone. Check permissions, then press the shortcut again.",
+      });
+    }
+  }, [settings.selectedModel, updateTrial]);
+
+  const stopTrialRecording = useCallback(() => {
+    if (startInFlightRef.current && recorderRef.current?.state !== "recording") {
+      stopRequestedDuringStartRef.current = true;
+      return;
+    }
+    if (recorderRef.current?.state === "recording") {
+      log.info("Shortcut onboarding test: stopping recording", { trial: recorderTrialRef.current });
+      recorderRef.current.stop();
+    }
+  }, []);
+
+  const handleTapToggle = useCallback(() => {
+    const trial = activeTrialRef.current;
+    if (trial !== "tap") return;
+    if (recorderRef.current?.state === "recording") {
+      stopTrialRecording();
+      return;
+    }
+    void startTrialRecording("tap");
+  }, [startTrialRecording, stopTrialRecording]);
+
+  useEffect(() => {
+    void window.electronAPI.setHotkeyTestCaptureActive(true);
+    const offStart = window.electronAPI.onDictationStart(() => {
+      if (activeTrialRef.current === "push") {
+        void startTrialRecording("push");
+      }
+    });
+    const offStop = window.electronAPI.onDictationStop(() => {
+      if (activeTrialRef.current === "push") {
+        stopTrialRecording();
+      }
+    });
+    const offToggle = window.electronAPI.onDictationToggle(handleTapToggle);
+
+    return () => {
+      offStart();
+      offStop();
+      offToggle();
+      void window.electronAPI.setHotkeyTestCaptureActive(false);
+      if (recorderRef.current?.state === "recording") {
+        recorderRef.current.stop();
+      }
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      onCompletionChange(false);
+    };
+  }, [handleTapToggle, onCompletionChange, startTrialRecording, stopTrialRecording]);
 
   return (
     <div className="hotkey-teach">
-      {/* Tap-to-talk trial */}
-      <div className={cn("hotkey-teach__trial", tapDone && "hotkey-teach__trial--done")}>
-        <div className="hotkey-teach__trial-label">
-          <MousePointerClick size={16} />
-          <span><strong>Tap to talk</strong> — press once to start, press again to stop</span>
-          {tapDone && <CheckCircle2 size={16} className="hotkey-teach__check" />}
-        </div>
-        <button
-          type="button"
-          className={cn("hotkey-teach__demo-btn", tapState === "recording" && "hotkey-teach__demo-btn--active")}
-          onClick={handleTapClick}
-          disabled={tapDone}
-        >
-          {tapState === "idle"
-            ? tapDone ? "Done ✓" : "Press to start"
-            : "Press again to stop"}
-        </button>
+      <div className="hotkey-teach__shortcut glass-panel-subtle">
+        <span>Shortcut</span>
+        <HotkeyChip hotkey={settings.hotkey} />
       </div>
 
-      {/* Push-to-talk trial */}
-      <div className={cn("hotkey-teach__trial", holdDone && "hotkey-teach__trial--done")}>
-        <div className="hotkey-teach__trial-label">
-          <Mic size={16} />
-          <span><strong>Push to talk</strong> — hold while speaking, release to stop</span>
-          {holdDone && <CheckCircle2 size={16} className="hotkey-teach__check" />}
-        </div>
-        <button
-          type="button"
-          className={cn("hotkey-teach__demo-btn", holdState === "recording" && "hotkey-teach__demo-btn--active")}
-          onMouseDown={handleHoldMouseDown}
-          onMouseUp={handleHoldMouseUp}
-          onMouseLeave={holdState === "recording" ? handleHoldMouseUp : undefined}
-          disabled={holdDone}
-        >
-          {holdDone ? "Done ✓" : "Hold to talk"}
-        </button>
-      </div>
+      <ShortcutTrialCard
+        active={activeTrial === "push"}
+        done={pushDone}
+        icon={Mic}
+        title="1. Press and hold"
+        instruction={`Hold ${shortcutLabel}, speak a short sentence, then release to stop.`}
+        state={trialStates.push}
+      />
 
-      {/* Mode picker — shown once both are tried */}
+      <ShortcutTrialCard
+        active={activeTrial === "tap"}
+        done={tapDone}
+        icon={MousePointerClick}
+        title="2. Press twice"
+        instruction={`Press ${shortcutLabel} once, speak, then press it again to stop.`}
+        state={trialStates.tap}
+        disabled={!pushDone}
+      />
+
       {bothDone && (
         <div className="hotkey-teach__pick">
           <p className="hotkey-teach__pick-label">Which felt better?</p>
           <div className="settings-mode-options" role="radiogroup" aria-label="Preferred hotkey mode">
-            {hotkeyModeOptions.map((option) => {
+            {hotkeyModeOptions(t).map((option) => {
               const Icon = option.icon;
               return (
                 <label
@@ -1407,127 +2381,143 @@ function HotkeyTeachStep({
   );
 }
 
-function DictationTestStep({ settings }: { settings: AppSettings }) {
-  const [testState, setTestState] = useState<"idle" | "recording" | "processing" | "done" | "error">("idle");
-  const [transcript, setTranscript] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+function ShortcutTrialCard({
+  active,
+  done,
+  disabled = false,
+  icon: Icon,
+  title,
+  instruction,
+  state,
+}: {
+  active: boolean;
+  done: boolean;
+  disabled?: boolean;
+  icon: LucideIcon;
+  title: string;
+  instruction: string;
+  state: {
+    status: "waiting" | "recording" | "processing" | "done" | "error";
+    transcript: string;
+    error: string;
+  };
+}) {
+  const placeholder = disabled
+    ? "Complete the first test to unlock this one."
+    : state.status === "recording"
+      ? "Listening... speak now."
+      : state.status === "processing"
+        ? "Transcribing..."
+        : state.status === "error"
+          ? state.error
+          : "Your transcription will appear here.";
+  const dotState = state.status === "waiting"
+    ? active ? "starting" : "idle"
+    : state.status === "done"
+      ? "complete"
+      : state.status;
 
-  async function startRecording() {
-    log.info("Dictation test: starting recording");
-    setTestState("recording");
-    setTranscript("");
-    setErrorMessage("");
-    chunksRef.current = [];
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        setTestState("processing");
-        try {
-          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-          const arrayBuffer = await blob.arrayBuffer();
-          const result = await window.electronAPI.transcribeLocalWhisper(arrayBuffer, {
-            selectedModel: settings.selectedModel,
-          });
-          setTranscript(result.text);
-          setTestState("done");
-          log.info("Dictation test complete", { chars: result.text.length });
-        } catch (err) {
-          log.error("Dictation test transcription failed", err);
-          setErrorMessage(err instanceof Error ? err.message : "Transcription failed.");
-          setTestState("error");
-        }
-      };
-      recorder.start();
-    } catch (err) {
-      log.warn("Dictation test mic access failed", err);
-      setErrorMessage("Could not access microphone. Check permissions.");
-      setTestState("error");
+  return (
+    <article
+      className={cn(
+        "hotkey-teach__trial glass-panel-subtle",
+        active && "hotkey-teach__trial--active",
+        done && "hotkey-teach__trial--done",
+        disabled && "hotkey-teach__trial--disabled",
+      )}
+    >
+      <div className="hotkey-teach__trial-label">
+        <Icon size={17} />
+        <span>
+          <strong>{title}</strong>
+          {" — "}
+          {instruction}
+        </span>
+        {done && <CheckCircle2 size={17} className="hotkey-teach__check" />}
+      </div>
+      <div className="hotkey-teach__status">
+        <span className="status-dot" data-state={dotState} />
+        <span>
+          {disabled
+            ? "Waiting"
+            : state.status === "recording"
+              ? "Listening"
+              : state.status === "processing"
+                ? "Transcribing"
+                : state.status === "done"
+                  ? "Complete"
+                  : state.status === "error"
+                    ? "Try again"
+                    : active
+                      ? "Press the shortcut now"
+                      : "Up next"}
+        </span>
+      </div>
+      <textarea
+        className="hotkey-teach__textarea"
+        readOnly
+        value={state.transcript}
+        placeholder={placeholder}
+        aria-label={`${title} transcription output`}
+      />
+    </article>
+  );
+}
+
+function preferredRecordingMimeType(): string {
+  if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
+  if (MediaRecorder.isTypeSupported("audio/webm")) return "audio/webm";
+  return "";
+}
+
+async function recordingBlobToWav(blob: Blob): Promise<ArrayBuffer> {
+  const raw = await blob.arrayBuffer();
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  let decoded: AudioBuffer;
+  try {
+    decoded = await ctx.decodeAudioData(raw);
+  } finally {
+    await ctx.close();
+  }
+
+  const pcmFloat = new Float32Array(decoded.length);
+  for (let channelIndex = 0; channelIndex < decoded.numberOfChannels; channelIndex++) {
+    const channel = decoded.getChannelData(channelIndex);
+    for (let sampleIndex = 0; sampleIndex < decoded.length; sampleIndex++) {
+      pcmFloat[sampleIndex] += channel[sampleIndex] / decoded.numberOfChannels;
     }
   }
 
-  function stopRecording() {
-    mediaRecorderRef.current?.stop();
+  const pcmInt16 = new Int16Array(decoded.length);
+  for (let sampleIndex = 0; sampleIndex < decoded.length; sampleIndex++) {
+    const sample = Math.max(-1, Math.min(1, pcmFloat[sampleIndex]));
+    pcmInt16[sampleIndex] = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7fff);
   }
 
-  function reset() {
-    setTestState("idle");
-    setTranscript("");
-    setErrorMessage("");
-  }
+  const dataLength = pcmInt16.byteLength;
+  const wav = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(wav);
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index++) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
 
-  const isRecording = testState === "recording";
-  const isProcessing = testState === "processing";
-  const isBusy = isRecording || isProcessing;
-
-  return (
-    <div className="dictation-test">
-      <div className="dictation-test__text-zone glass-panel-subtle">
-        <textarea
-          className="dictation-test__textarea"
-          readOnly
-          placeholder={
-            testState === "idle"
-              ? "Your transcription will appear here…"
-              : testState === "recording"
-                ? "Listening… speak now."
-                : testState === "processing"
-                  ? "Transcribing…"
-                  : transcript || errorMessage
-          }
-          value={transcript}
-          aria-label="Transcription output"
-        />
-        {testState === "done" && transcript && (
-          <div className="dictation-test__badge dictation-test__badge--ok">
-            <CheckCircle2 size={14} />
-            Transcription successful
-          </div>
-        )}
-        {testState === "error" && (
-          <div className="dictation-test__badge dictation-test__badge--err">
-            <ShieldAlert size={14} />
-            {errorMessage}
-          </div>
-        )}
-      </div>
-      <div className="dictation-test__controls">
-        {!isBusy && testState !== "done" && (
-          <TextButton variant="primary" onClick={() => void startRecording()}>
-            <Mic size={17} />
-            Start Recording
-          </TextButton>
-        )}
-        {isRecording && (
-          <TextButton variant="primary" onClick={stopRecording}>
-            <span className="status-dot" data-state="recording" style={{ marginRight: 4 }} />
-            Stop Recording
-          </TextButton>
-        )}
-        {isProcessing && (
-          <TextButton variant="glass" disabled>
-            <span className="status-dot" data-state="processing" style={{ marginRight: 4 }} />
-            Transcribing…
-          </TextButton>
-        )}
-        {(testState === "done" || testState === "error") && (
-          <TextButton variant="glass" onClick={reset}>
-            <RefreshCw size={17} />
-            Try Again
-          </TextButton>
-        )}
-      </div>
-    </div>
-  );
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, decoded.sampleRate, true);
+  view.setUint32(28, decoded.sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, "data");
+  view.setUint32(40, dataLength, true);
+  new Int16Array(wav, 44).set(pcmInt16);
+  return wav;
 }
 
 function PreferencesStep({
@@ -1587,28 +2577,37 @@ function whisperStatusLabel(status: RuntimeStatus["whisper"]): string {
 
 function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: RuntimeStatus }) {
   return (
-    <div className="finish-card">
-      <div className="finish-card__mic">
-        <Mic size={36} />
-      </div>
-      <dl>
+    <div className="finish-card glass-panel-subtle">
+      <div className="finish-card__header">
+        <div className="finish-card__mic">
+          <Mic size={30} />
+        </div>
         <div>
+          <span>Dictation is ready</span>
+          <h2>Use it in any app.</h2>
+          <p>Keep your cursor where you want text to appear, then use the shortcut you just tested.</p>
+        </div>
+      </div>
+      <dl className="finish-card__status">
+        <div className="finish-card__status-item">
           <dt>Shortcut</dt>
           <dd><HotkeyChip hotkey={settings.hotkey} /></dd>
         </div>
-        <div>
+        <div className="finish-card__status-item">
           <dt>Mode</dt>
           <dd>{settings.mode === "tap-to-talk" ? "Tap to talk" : "Push to talk"}</dd>
         </div>
-        <div>
+        <div className="finish-card__status-item">
           <dt>AI Model</dt>
           <dd>{whisperStatusLabel(runtime.whisper)}</dd>
         </div>
       </dl>
-      <TextButton onClick={() => window.electronAPI.openPanel()}>
-        <MousePointerClick size={17} />
-        Show Control Panel
-      </TextButton>
+      <div className="finish-card__actions">
+        <TextButton variant="glass" onClick={() => window.electronAPI.openPanel()}>
+          <MousePointerClick size={17} />
+          Show Control Panel
+        </TextButton>
+      </div>
     </div>
   );
 }

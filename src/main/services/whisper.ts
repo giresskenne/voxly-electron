@@ -129,15 +129,25 @@ export class WhisperService {
       const audio = await this.fileToBuffer(audioPath);
       const file = new Blob([new Uint8Array(audio).slice()], { type: "audio/wav" });
       form.append("file", file, "audio.wav");
-      form.append("language", settings.language);
-      form.append("prompt", settings.customDictionary.join(" "));
+      // Preserve the spoken language first. We only translate later if the user asks.
+      // For mismatch prompts to work reliably, inference must not be forced to the UI/configured language.
+      const requestedLanguage = "auto";
+      form.append("language", requestedLanguage);
+      form.append("task", "transcribe");
+
+      const prompt = settings.customDictionary.join(" ").trim();
+      if (prompt) form.append("prompt", prompt);
 
       const started = Date.now();
       const response = await fetch(`http://127.0.0.1:${settings.whisperPort}/inference`, {
         method: "POST",
         body: form,
       });
-      log.debug("Whisper inference response received", { status: response.status, elapsedMs: Date.now() - started });
+      log.debug("Whisper inference response received", {
+        status: response.status,
+        elapsedMs: Date.now() - started,
+        requestedLanguage,
+      });
 
       if (!response.ok) {
         throw new Error(`Whisper server returned ${response.status}`);

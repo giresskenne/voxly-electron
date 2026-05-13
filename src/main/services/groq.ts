@@ -1,7 +1,7 @@
 import type { AppSettings, AudioChunk } from "../types";
 import { createMainLogger } from "../debug-log";
 import { credentialStore } from "./credential-store";
-import { fetchBackend, getBackendSessionToken, parseBackendError, resolveBackendBaseUrl } from "./backend-api";
+import { BackendRejectedError, fetchBackend, getBackendAiCapabilities, getBackendSessionToken, parseBackendError, resolveBackendBaseUrl } from "./backend-api";
 
 const log = createMainLogger("groq");
 
@@ -22,13 +22,24 @@ export class GroqTranscriptionService {
     const backendBaseUrl = resolveBackendBaseUrl();
     const backendToken = backendBaseUrl ? await getBackendSessionToken() : "";
     const directApiKey = await this.resolveApiKey(settings);
-    const useBackend = Boolean(backendBaseUrl && backendToken);
+
+    // Check backend capability before deciding to use it
+    let backendHasTranscription = false;
+    if (backendBaseUrl && backendToken) {
+      const caps = await getBackendAiCapabilities();
+      backendHasTranscription = caps.transcription;
+    }
+
+    const useBackend = Boolean(backendBaseUrl && backendToken && backendHasTranscription);
 
     if (!useBackend && !directApiKey) {
+      // Backend capability check already logged — throw silently so ipc.ts falls through to local Whisper
       throw new Error(
-        backendBaseUrl
-          ? "Sign in to use cloud transcription."
-          : "Cloud transcription requires VITE_API_URL or a Groq API key in settings.",
+        backendHasTranscription === false && backendBaseUrl
+          ? "Backend transcription unavailable — no API key configured on server."
+          : backendBaseUrl
+            ? "Sign in to use cloud transcription."
+            : "Cloud transcription requires VITE_API_URL or a Groq API key in settings.",
       );
     }
 
@@ -94,7 +105,7 @@ export class GroqTranscriptionService {
     });
 
     if (!response.ok) {
-      throw new Error(parseBackendError(body, `Backend transcription returned ${response.status}`));
+      throw new BackendRejectedError(parseBackendError(body, `Backend transcription returned ${response.status}`));
     }
 
     return payload.text?.trim() ?? "";
@@ -138,7 +149,7 @@ export class GroqTranscriptionService {
     const file = new Blob([new Uint8Array(chunk.buffer).slice()], { type: chunk.mimeType || "audio/webm" });
     form.append("file", file, `audio-${index + 1}.webm`);
     form.append("model", GROQ_MODEL);
-    form.append("language", settings.language);
+    // Let the model detect the spoken language so mixed-language dictation is preserved.
 
     const prompt = settings.customDictionary.join(" ").trim();
     if (prompt) form.append("prompt", prompt);

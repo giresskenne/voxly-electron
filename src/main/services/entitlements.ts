@@ -7,7 +7,7 @@ const log = createMainLogger("entitlements");
 const ENTITLEMENT_TTL_MS = 60_000;
 
 const PLAN_CAPABILITIES: Record<BillingPlan, { cloud: boolean; cleanup: boolean }> = {
-  free: { cloud: false, cleanup: true },
+  free: { cloud: true, cleanup: true },
   starter: { cloud: true, cleanup: true },
   pro: { cloud: true, cleanup: true },
 };
@@ -34,10 +34,6 @@ function parseStatus(value: unknown): BillingStatus {
   return "unknown";
 }
 
-function isPaidStatus(status: BillingStatus): boolean {
-  return status === "active";
-}
-
 function makeDefault(reason: string): EntitlementStatus {
   return {
     isAuthenticated: false,
@@ -58,20 +54,25 @@ export class EntitlementService {
     return this.cache;
   }
 
-  async setSessionToken(token: string): Promise<void> {
+  async setSessionToken(token: string, refreshToken?: string): Promise<void> {
     const trimmed = token.trim();
     if (!trimmed) {
       await credentialStore.clear("sessionToken");
+      await credentialStore.clear("refreshToken");
       this.cache = makeDefault("session-cleared");
       return;
     }
 
     await credentialStore.save("sessionToken", trimmed);
+    if (refreshToken?.trim()) {
+      await credentialStore.save("refreshToken", refreshToken.trim());
+    }
     this.cache = makeDefault("session-updated");
   }
 
   async clearSessionToken(): Promise<void> {
     await credentialStore.clear("sessionToken");
+    await credentialStore.clear("refreshToken");
     this.cache = makeDefault("session-cleared");
   }
 
@@ -84,6 +85,25 @@ export class EntitlementService {
     }
 
     if (!resolveBackendBaseUrl()) {
+      // No backend configured — check if a token is stored anyway so we can
+      // at least reflect the sign-in state without a network call.
+      const token = await getBackendSessionToken();
+      if (token) {
+        // Keep the previous cache if it already reflects a real auth state.
+        if (this.cache.isAuthenticated) return this.cache;
+        // Otherwise mark as authenticated with unknown billing.
+        this.cache = {
+          isAuthenticated: true,
+          billingPlan: "free",
+          billingStatus: "unknown",
+          canUseCloudTranscription: false,
+          canUseCleanup: true,
+          checkedAt: new Date().toISOString(),
+          source: "default",
+          reason: "missing-api-url",
+        };
+        return this.cache;
+      }
       this.cache = makeDefault("missing-api-url");
       return this.cache;
     }
@@ -119,13 +139,12 @@ export class EntitlementService {
         payload.profile?.billingStatus ?? payload.billingStatus ?? payload.user?.billingStatus,
       );
       const planCapabilities = PLAN_CAPABILITIES[billingPlan];
-      const paidAllowed = isPaidStatus(billingStatus);
 
       this.cache = {
         isAuthenticated: true,
         billingPlan,
         billingStatus,
-        canUseCloudTranscription: paidAllowed && planCapabilities.cloud,
+        canUseCloudTranscription: planCapabilities.cloud,
         canUseCleanup: planCapabilities.cleanup,
         checkedAt: new Date().toISOString(),
         source: "remote",
@@ -133,7 +152,24 @@ export class EntitlementService {
       return this.cache;
     } catch (error) {
       log.warn("Entitlement refresh failed", { error });
-      this.cache = makeDefault("network-error");
+      // If we have a token, preserve authenticated state so the UI
+      // doesn't drop to "signed out" just because the network is unavailable.
+      const token = await getBackendSessionToken();
+      if (token) {
+        const prev = this.cache;
+        this.cache = {
+          isAuthenticated: true,
+          billingPlan: prev.isAuthenticated ? prev.billingPlan : "free",
+          billingStatus: prev.isAuthenticated ? prev.billingStatus : "unknown",
+          canUseCloudTranscription: prev.isAuthenticated ? prev.canUseCloudTranscription : false,
+          canUseCleanup: true,
+          checkedAt: new Date().toISOString(),
+          source: "default",
+          reason: "network-error",
+        };
+      } else {
+        this.cache = makeDefault("network-error");
+      }
       return this.cache;
     }
   }

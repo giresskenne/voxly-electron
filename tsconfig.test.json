@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "noEmit": false,
+    "outDir": ".test-build",
+    "rootDir": ".",
+    "isolatedModules": false
+  },
+  "include": [
+    "tests/**/*.ts",
+    "src/main/services/cleanup-fidelity.ts",
+    "src/renderer/lib/i18n.ts"
+  ]
+}
