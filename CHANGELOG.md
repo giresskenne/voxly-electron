@@ -1,3 +1,10 @@
+## [1.0.6-feature-onboarding-free-weekly-limit.2](https://github.com/giresskenne/voxly-electron/compare/v1.0.6-feature-onboarding-free-weekly-limit.1...v1.0.6-feature-onboarding-free-weekly-limit.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* make auth deep link sync durable ([38deb03](https://github.com/giresskenne/voxly-electron/commit/38deb031f9cc5001233d765f9908199c58585d52))
+
 ## [1.0.6-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.5...v1.0.6-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 
