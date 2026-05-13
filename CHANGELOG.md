@@ -1,3 +1,12 @@
+## [1.0.4-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.3...v1.0.4-feature-onboarding-free-weekly-limit.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* **desktop:** repair prod whisper and accessibility ([7950fa3](https://github.com/giresskenne/voxly-electron/commit/7950fa3c78793d62ebae28470ec2a8269e6e00a5))
+* prevent idle overlay input capture and add next update notes ([4c34d7a](https://github.com/giresskenne/voxly-electron/commit/4c34d7af9cbb199e823fb3a1d21571f44684847d))
+* validate bundled whisper model before launch ([fa76e1a](https://github.com/giresskenne/voxly-electron/commit/fa76e1acbdb7d6b2e28252f1dc0db48326b202d6))
+
 ## [1.0.3](https://github.com/giresskenne/voxly-electron/compare/v1.0.2...v1.0.3) (2026-05-09)
 
 
