@@ -1,3 +1,10 @@
+## [1.0.6-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.5...v1.0.6-feature-onboarding-free-weekly-limit.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* **ci:** declare dictafun deep link protocol ([5aa8be6](https://github.com/giresskenne/voxly-electron/commit/5aa8be616caa242d5b40aa7dd84b2587260a6ded))
+
 ## [1.0.5-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 
