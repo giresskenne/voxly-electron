@@ -1,3 +1,10 @@
+## [1.0.5-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5-feature-onboarding-free-weekly-limit.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* prevent idle overlay input capture and add next update notes ([4c34d7a](https://github.com/giresskenne/voxly-electron/commit/4c34d7af9cbb199e823fb3a1d21571f44684847d))
+
 ## [1.0.4-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.3...v1.0.4-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 
