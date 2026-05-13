@@ -18,6 +18,7 @@ import { updateChecker } from "./services/update-checker";
 import { MOCK_TRANSCRIPTION_TEXT } from "./services/mock-transcription";
 import { buildWeeklyUsageStatus, countWords } from "./services/usage-policy";
 import { fetchBackend, getBackendSessionToken, parseBackendError, setOnSessionExpired, BackendRejectedError } from "./services/backend-api";
+import { consumePendingDeepLinks } from "./services/deep-links";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
@@ -113,6 +114,12 @@ export function registerIpc(): void {
   ipcMain.handle("auth:has-session-token", async () => {
     const token = await getBackendSessionToken();
     return token.length > 0;
+  });
+
+  ipcMain.handle("app:consume-pending-deep-links", () => {
+    const deepLinks = consumePendingDeepLinks();
+    log.debug("IPC app:consume-pending-deep-links", { count: deepLinks.length });
+    return deepLinks;
   });
 
   ipcMain.handle("entitlement:get", async (_, force?: boolean) => {

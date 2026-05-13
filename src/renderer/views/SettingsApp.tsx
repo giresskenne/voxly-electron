@@ -544,6 +544,12 @@ export function SettingsApp() {
   useEffect(() => {
     log.info("Settings app mounted");
     void refresh();
+    void window.electronAPI.consumePendingDeepLinks().then((urls) => {
+      for (const url of urls) {
+        log.info("Processing queued deep link", { url });
+        void handleDeepLink(url);
+      }
+    });
     const offRuntime = window.electronAPI.onRuntimeStatus(setRuntime);
     const offSaved = window.electronAPI.onTranscriptionSaved(() => {
       window.electronAPI.listHistory(20).then(setHistory);

@@ -8,6 +8,7 @@ import { whisperService } from "./services/whisper";
 import { unregisterHotkeys } from "./services/hotkeys";
 import { globeKeyManager } from "./services/globe-key-manager";
 import { entitlementService } from "./services/entitlements";
+import { queueDeepLink } from "./services/deep-links";
 import { windows } from "./window-manager";
 import { createMainLogger, ensureFileLogging } from "./debug-log";
 
@@ -18,7 +19,6 @@ loadDotenv({ path: path.join(__dirname, "../../resources/runtime.env"), override
 
 const log = createMainLogger("main");
 const DEEP_LINK_PROTOCOL = "dictafun";
-const pendingDeepLinks: string[] = [];
 
 function getDeepLinkFromArgv(argv: string[]): string | null {
   const prefix = `${DEEP_LINK_PROTOCOL}://`;
@@ -26,16 +26,8 @@ function getDeepLinkFromArgv(argv: string[]): string | null {
 }
 
 function dispatchDeepLink(url: string): void {
-  pendingDeepLinks.push(url);
+  queueDeepLink(url);
   windows.createSettings();
-  const settingsWindow = windows.settings;
-  if (!settingsWindow || settingsWindow.isDestroyed()) return;
-
-  while (pendingDeepLinks.length > 0) {
-    const next = pendingDeepLinks.shift();
-    if (!next) continue;
-    settingsWindow.webContents.send("app:deep-link", next);
-  }
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();

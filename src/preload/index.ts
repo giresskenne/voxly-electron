@@ -51,6 +51,7 @@ const api = {
   openWebRoute: (route: "pricing" | "signup" | "signin" | "privacy" | "terms" | "help" | "feedback" | "referral") =>
     invoke<void>("app:open-web-route", route),
   openURL: (url: string) => invoke<void>("app:open-url", url),
+  consumePendingDeepLinks: () => invoke<string[]>("app:consume-pending-deep-links"),
   openApplicationsFolder: () => invoke<void>("app:open-applications-folder"),
   getAppVersion: () => invoke<string>("app:version"),
   checkForUpdates: (force?: boolean) => invoke<DesktopUpdateStatus>("app:update-check", force),
