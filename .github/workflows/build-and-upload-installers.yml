@@ -47,6 +47,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate macOS dictafun protocol
+        run: |
+          node -e 'const pkg=require("./package.json"); const protocols=pkg.build?.protocols; if(!Array.isArray(protocols)||protocols[0]?.schemes?.[0]!=="dictafun"){throw new Error("missing dictafun protocol")} console.log("protocol ok")'
+
       - name: Create runtime env file
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
