@@ -1,5 +1,5 @@
 import { Notification, app, ipcMain, shell, systemPreferences } from "electron";
-import type { AppSettings, LangMismatch, PasteAttention, RuntimeStatus, ReferralStatus } from "./types";
+import type { AppSettings, CleanupLaterResult, CleanupStatus, LangMismatch, MainDictationTiming, PasteAttention, RuntimeStatus, ReferralStatus, TranscriptionRecord } from "./types";
 import { detectLanguage, normalizeToIso } from "./services/lang-detect";
 import { settingsStore } from "./services/settings-store";
 import { transcriptionDatabase } from "./services/database";
@@ -17,13 +17,15 @@ import { billingService } from "./services/billing";
 import { updateChecker } from "./services/update-checker";
 import { MOCK_TRANSCRIPTION_TEXT } from "./services/mock-transcription";
 import { buildWeeklyUsageStatus, countWords } from "./services/usage-policy";
-import { fetchBackend, getBackendSessionToken, parseBackendError, setOnSessionExpired, BackendRejectedError } from "./services/backend-api";
+import { fetchBackend, getBackendSessionToken, parseBackendError, setOnSessionExpired, BackendRejectedError, warmupAi } from "./services/backend-api";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
 const PUSH_HOLD_START_DELAY_MS = 20;
 const PUSH_STOP_COOLDOWN_MS = 300;
 const TAP_TOGGLE_DEBOUNCE_MS = 250;
+const SHORT_CLEANUP_MIN_WORDS = 5;
+const SHORT_CLEANUP_MIN_CHARS = 25;
 let pushKeyDownAt = 0;
 let pushKeyIsRecording = false;
 let pushLastStopAt = 0;
@@ -34,8 +36,21 @@ const PASTE_ATTENTION_NOTIFICATION_COOLDOWN_MS = 10_000;
 let lastUsageNotificationKind: "approaching" | "limit-reached" | null = null;
 let hotkeyTestCaptureActive = false;
 
+function logFnFlow(message: string, meta?: unknown): void {
+  if (app.isPackaged) return;
+  log.info(`[fn-flow] ${message}`, meta);
+}
+
 type TranscriptionOptions = Partial<AppSettings> & {
   saveToHistory?: boolean;
+};
+
+type CleanupOutcome = {
+  text: string;
+  method: TranscriptionRecord["processingMethod"];
+  cleanupMs: number;
+  cleanupSkipped: boolean;
+  cleanupStatus: CleanupStatus;
 };
 
 const ALLOWED_EXTERNAL_HOSTS = new Set(["dictafun.com", "www.dictafun.com"]);
@@ -93,6 +108,8 @@ export function registerIpc(): void {
     await entitlementService.setSessionToken(token, refreshToken);
     const entitlements = await entitlementService.refresh(true);
     await applyEntitlementGates(entitlements);
+    // Fire-and-forget AI warmup after login so the first dictation is faster.
+    void warmupAi();
     log.info("Session token updated", {
       authenticated: entitlements.isAuthenticated,
       billingPlan: entitlements.billingPlan,
@@ -190,8 +207,11 @@ export function registerIpc(): void {
       transcriptionMode: settings.transcriptionMode,
       textLength: originalText.length,
     });
-    log.debug("Pipeline transcript text", {
-      transcribedText: originalText,
+    const logTranscripts = process.env.DICTAFUN_LOG_TRANSCRIPTS === "1";
+    log.debug("Pipeline transcript stats", {
+      ...(logTranscripts ? { transcribedText: originalText } : {}),
+      textLength: originalText.length,
+      wordCount: countWords(originalText),
       language: settings.language,
       transcriptionMode: settings.transcriptionMode,
     });
@@ -199,7 +219,13 @@ export function registerIpc(): void {
     // Nothing was said — skip cleanup, DB save, and paste.
     if (!originalText.trim()) {
       log.info("IPC transcribe:local-whisper — blank audio, aborting pipeline");
-      return { text: "", originalText: "", record: null, langMismatch: null };
+      return {
+        text: "",
+        originalText: "",
+        record: null,
+        langMismatch: null,
+        timing: buildMainTiming(settings, transcribeMs, 0, 0, true, "not_requested"),
+      };
     }
 
     // Detect language mismatch: if the user spoke a different language than configured.
@@ -241,28 +267,35 @@ export function registerIpc(): void {
       throw new Error("Weekly free word limit reached. Upgrade to keep dictating this week.");
     }
 
-    const t1 = Date.now();
-    const cleanup = settings.cleanupEnabled
-      ? await openAiCleanupService.process(originalText, settings)
-      : { text: originalText, method: "none" as const };
-    const cleanupMs = Date.now() - t1;
+    const cleanup = await cleanupTranscript(originalText, settings);
     log.info("Pipeline stage: cleanup complete", {
-      cleanupMs,
+      cleanupMs: cleanup.cleanupMs,
       cleanupEnabled: settings.cleanupEnabled,
+      cleanupMode: settings.cleanupMode,
       processingMethod: cleanup.method,
+      cleanupSkipped: cleanup.cleanupSkipped,
+      cleanupStatus: cleanup.cleanupStatus,
       originalLength: originalText.length,
       processedLength: cleanup.text.length,
     });
-    log.debug("Pipeline cleanup text", {
-      recordedText: originalText,
-      cleanedText: cleanup.text,
+    log.debug("Pipeline cleanup stats", {
+      ...(logTranscripts ? { recordedText: originalText, cleanedText: cleanup.text } : {}),
       cleanupEnabled: settings.cleanupEnabled,
+      cleanupMode: settings.cleanupMode,
       processingMethod: cleanup.method,
+      cleanupSkipped: cleanup.cleanupSkipped,
+      cleanupStatus: cleanup.cleanupStatus,
     });
 
     if (!saveToHistory) {
       log.info("IPC transcribe:local-whisper — returning without history save");
-      return { text: cleanup.text, originalText, record: null, langMismatch };
+      return {
+        text: cleanup.text,
+        originalText,
+        record: null,
+        langMismatch,
+        timing: buildMainTiming(settings, transcribeMs, cleanup.cleanupMs, 0, cleanup.cleanupSkipped, cleanup.cleanupStatus),
+      };
     }
 
     const t2 = Date.now();
@@ -288,20 +321,105 @@ export function registerIpc(): void {
       maybeNotifyUsageLimit("approaching");
     }
 
+    const pipelineTiming: MainDictationTiming = buildMainTiming(
+      settings,
+      transcribeMs,
+      cleanup.cleanupMs,
+      dbMs,
+      cleanup.cleanupSkipped,
+      cleanup.cleanupStatus,
+    );
     log.info("IPC transcribe:local-whisper — pipeline complete", {
       totalMs: Date.now() - pipelineStart,
-      transcribeMs,
-      cleanupMs,
-      dbMs,
+      ...pipelineTiming,
     });
 
-    return { text: cleanup.text, originalText, record: row, langMismatch };
+    return { text: cleanup.text, originalText, record: row, langMismatch, timing: pipelineTiming };
+  });
+
+  ipcMain.handle("transcription:cleanup-later", async (_, text: string, options?: TranscriptionOptions): Promise<CleanupLaterResult> => {
+    const started = Date.now();
+    const entitlement = await entitlementService.refresh();
+    const settings = entitlementService.gateSettings(
+      { ...settingsStore.get(), ...options },
+      entitlement,
+    );
+    log.info("IPC transcription:cleanup-later — start", {
+      textLength: text.length,
+      wordCount: countWords(text),
+      cleanupEnabled: settings.cleanupEnabled,
+      cleanupMode: settings.cleanupMode,
+    });
+
+    let cleanup: CleanupOutcome;
+    try {
+      cleanup = await cleanupTranscript(text, settings);
+    } catch (error) {
+      log.warn("Background cleanup failed — saving raw transcript", {
+        error: error instanceof Error ? error.message : String(error),
+        textLength: text.length,
+      });
+      cleanup = { text, method: "none", cleanupMs: Date.now() - started, cleanupSkipped: true, cleanupStatus: "failed" };
+    }
+    const t0 = Date.now();
+    const row = await transcriptionDatabase.save({
+      originalText: text,
+      processedText: cleanup.text,
+      isProcessed: cleanup.method !== "none",
+      processingMethod: cleanup.method,
+      agentName: cleanup.method === "agent" ? settings.agentName : null,
+      error: null,
+    });
+    const dbMs = Date.now() - t0;
+    windows.sendTranscriptionSaved();
+
+    const updatedUsage = buildWeeklyUsageStatus(
+      await transcriptionDatabase.wordCountThisWeek(),
+      entitlement,
+    );
+    if (updatedUsage.isLimitReached) {
+      maybeNotifyUsageLimit("limit-reached");
+    } else if (updatedUsage.isApproachingLimit) {
+      maybeNotifyUsageLimit("approaching");
+    }
+
+    log.info("IPC transcription:cleanup-later — complete", {
+      totalMs: Date.now() - started,
+      cleanupMs: cleanup.cleanupMs,
+      dbSaveMs: dbMs,
+      recordId: row.id,
+      cleanupSkipped: cleanup.cleanupSkipped,
+      cleanupStatus: cleanup.cleanupStatus,
+      processedLength: cleanup.text.length,
+    });
+
+    return {
+      text: cleanup.text,
+      originalText: text,
+      record: row,
+      timing: {
+        cleanupMs: cleanup.cleanupMs,
+        dbSaveMs: dbMs,
+        cleanupMode: settings.cleanupMode,
+        cleanupEnabled: settings.cleanupEnabled,
+        cleanupSkipped: cleanup.cleanupSkipped,
+        cleanupStatus: cleanup.cleanupStatus,
+      },
+    };
   });
 
   ipcMain.handle("paste:text", async (_, text: string) => {
-    log.info("IPC paste:text", { text });
+    const startedAt = Date.now();
+    log.info("IPC paste:text", { textLength: text.length });
+    logFnFlow("paste IPC received", { textLength: text.length });
     await windows.prepareOverlayForPaste();
     const result = await pasteText(text);
+    logFnFlow("paste IPC completed", {
+      ok: result.ok,
+      attentionKind: result.attention?.kind ?? null,
+      elapsedMs: Date.now() - startedAt,
+      textLength: text.length,
+    });
 
     if (result.ok) {
       if (pasteAttention) {
@@ -577,6 +695,7 @@ export function getRuntimeStatus(): RuntimeStatus {
   const status = {
     appVersion: app.getVersion(),
     platform: process.platform,
+    arch: process.arch,
     microphone: getMicrophoneStatus(),
     accessibility: getAccessibilityStatus(),
     whisper: whisperService.getStatus(),
@@ -594,7 +713,13 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
     return MOCK_TRANSCRIPTION_TEXT;
   }
 
-  // Primary: Groq cloud transcription (via backend session or direct API key).
+  // Respect the user's explicit transcription mode — skip cloud entirely in local mode.
+  if (settings.transcriptionMode === "local") {
+    log.debug("transcriptionMode=local — using Whisper directly");
+    return whisperService.transcribe(buffer, settings);
+  }
+
+  // Cloud mode: try Groq/backend first.
   try {
     return await groqTranscriptionService.transcribe(buffer, settings, chunks);
   } catch (err) {
@@ -615,6 +740,54 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
 
   // Fallback: local Whisper server.
   return whisperService.transcribe(buffer, settings);
+}
+
+async function cleanupTranscript(originalText: string, settings: AppSettings): Promise<CleanupOutcome> {
+  if (!settings.cleanupEnabled) {
+    return { text: originalText, method: "none", cleanupMs: 0, cleanupSkipped: true, cleanupStatus: "not_requested" };
+  }
+
+  const wordCount = countWords(originalText);
+  const textLength = originalText.trim().length;
+  if (wordCount < SHORT_CLEANUP_MIN_WORDS || textLength < SHORT_CLEANUP_MIN_CHARS) {
+    log.info("Cleanup skipped for short transcript", {
+      textLength,
+      wordCount,
+      minWords: SHORT_CLEANUP_MIN_WORDS,
+      minChars: SHORT_CLEANUP_MIN_CHARS,
+    });
+    return { text: originalText, method: "none", cleanupMs: 0, cleanupSkipped: true, cleanupStatus: "skipped_short_text" };
+  }
+
+  const started = Date.now();
+  const cleanup = await openAiCleanupService.process(originalText, settings);
+  const cleanupStatus: CleanupStatus = cleanup.text === originalText ? "completed_unchanged" : "completed_replaced";
+  return {
+    ...cleanup,
+    cleanupMs: Date.now() - started,
+    cleanupSkipped: false,
+    cleanupStatus,
+  };
+}
+
+function buildMainTiming(
+  settings: AppSettings,
+  transcriptionMs: number,
+  cleanupMs: number,
+  dbSaveMs: number,
+  cleanupSkipped: boolean,
+  cleanupStatus: CleanupStatus,
+): MainDictationTiming {
+  return {
+    transcriptionMs,
+    cleanupMs,
+    dbSaveMs,
+    transcriptionMode: settings.transcriptionMode,
+    cleanupMode: settings.cleanupMode,
+    cleanupEnabled: settings.cleanupEnabled,
+    cleanupSkipped,
+    cleanupStatus,
+  };
 }
 
 function shouldRefreshWhisper(patch: Partial<AppSettings>): boolean {
@@ -641,7 +814,14 @@ function configureDictationHotkey(settings: AppSettings): void {
 
 function handleHotkeyDown(): void {
   const settings = settingsStore.get();
+  logFnFlow("main received hotkey down", {
+    hotkey: settings.hotkey,
+    mode: settings.mode,
+    isGlobeLike: isGlobeLikeHotkey(settings.hotkey),
+    hotkeyTestCaptureActive,
+  });
   if (settings.mode === "push-to-talk" && isGlobeLikeHotkey(settings.hotkey)) {
+    logFnFlow("routing hotkey down to push-to-talk hold");
     startPushHold();
     return;
   }
@@ -656,24 +836,42 @@ function handleHotkeyDown(): void {
     const now = Date.now();
     if (now - tapLastToggleAt < TAP_TOGGLE_DEBOUNCE_MS) {
       log.debug("Ignoring duplicate Globe/Fn tap event");
+      logFnFlow("ignored duplicate Globe/Fn tap", {
+        elapsedSinceLastToggleMs: now - tapLastToggleAt,
+        debounceMs: TAP_TOGGLE_DEBOUNCE_MS,
+      });
       return;
     }
     tapLastToggleAt = now;
   }
 
+  logFnFlow("sending dictation toggle from hotkey down");
   sendDictationToggle();
 }
 
 function handleHotkeyUp(): void {
   const settings = settingsStore.get();
-  if (settings.mode !== "push-to-talk" || !isGlobeLikeHotkey(settings.hotkey)) return;
+  logFnFlow("main received hotkey up", {
+    hotkey: settings.hotkey,
+    mode: settings.mode,
+    isGlobeLike: isGlobeLikeHotkey(settings.hotkey),
+    pushKeyIsRecording,
+  });
+  if (settings.mode !== "push-to-talk" || !isGlobeLikeHotkey(settings.hotkey)) {
+    logFnFlow("ignored hotkey up for current mode/hotkey");
+    return;
+  }
 
   pushKeyDownAt = 0;
   pushLastStopAt = Date.now();
-  if (!pushKeyIsRecording) return;
+  if (!pushKeyIsRecording) {
+    logFnFlow("hotkey released before recording started");
+    return;
+  }
 
   pushKeyIsRecording = false;
   log.debug("Stopping dictation after push-to-talk release");
+  logFnFlow("sending dictation stop from hotkey up");
   sendDictationStop();
 }
 
@@ -681,13 +879,23 @@ function startPushHold(): void {
   const now = Date.now();
   if (now - pushLastStopAt < PUSH_STOP_COOLDOWN_MS) {
     log.debug("Ignoring push-to-talk press during cooldown");
+    logFnFlow("ignored push-to-talk press during cooldown", {
+      elapsedSinceStopMs: now - pushLastStopAt,
+      cooldownMs: PUSH_STOP_COOLDOWN_MS,
+    });
     return;
   }
 
   const pressStartedAt = now;
   pushKeyDownAt = pressStartedAt;
   pushKeyIsRecording = false;
+  logFnFlow("push-to-talk hold started", {
+    pressStartedAt,
+    startDelayMs: PUSH_HOLD_START_DELAY_MS,
+    hotkeyTestCaptureActive,
+  });
   if (!shouldCaptureHotkeyTest()) {
+    logFnFlow("showing overlay for push-to-talk hold");
     windows.showDictationPanel();
   }
 
@@ -701,6 +909,9 @@ function startPushHold(): void {
     ) {
       pushKeyIsRecording = true;
       log.debug("Starting dictation after push-to-talk hold threshold");
+      logFnFlow("hold threshold met; sending dictation start", {
+        heldMs: Date.now() - pressStartedAt,
+      });
       sendDictationStart();
     }
   }, PUSH_HOLD_START_DELAY_MS);

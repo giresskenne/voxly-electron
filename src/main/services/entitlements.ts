@@ -34,9 +34,15 @@ function parseStatus(value: unknown): BillingStatus {
   return "unknown";
 }
 
+function parseEmail(value: unknown): string | null {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized.includes("@") ? normalized : null;
+}
+
 function makeDefault(reason: string): EntitlementStatus {
   return {
     isAuthenticated: false,
+    accountEmail: null,
     billingPlan: "free",
     billingStatus: "unknown",
     canUseCloudTranscription: false,
@@ -94,6 +100,7 @@ export class EntitlementService {
         // Otherwise mark as authenticated with unknown billing.
         this.cache = {
           isAuthenticated: true,
+          accountEmail: this.cache.accountEmail,
           billingPlan: "free",
           billingStatus: "unknown",
           canUseCloudTranscription: false,
@@ -129,9 +136,11 @@ export class EntitlementService {
         billingPlan?: unknown;
         billingStatus?: unknown;
         profile?: { billingPlan?: unknown; billingStatus?: unknown };
-        user?: { billingPlan?: unknown; billingStatus?: unknown };
+        user?: { billingPlan?: unknown; billingStatus?: unknown; email?: unknown };
+        email?: unknown;
       };
 
+      const accountEmail = parseEmail(payload.user?.email ?? payload.email);
       const billingPlan = parsePlan(
         payload.profile?.billingPlan ?? payload.billingPlan ?? payload.user?.billingPlan,
       );
@@ -142,6 +151,7 @@ export class EntitlementService {
 
       this.cache = {
         isAuthenticated: true,
+        accountEmail,
         billingPlan,
         billingStatus,
         canUseCloudTranscription: planCapabilities.cloud,
@@ -159,6 +169,7 @@ export class EntitlementService {
         const prev = this.cache;
         this.cache = {
           isAuthenticated: true,
+          accountEmail: prev.isAuthenticated ? prev.accountEmail : null,
           billingPlan: prev.isAuthenticated ? prev.billingPlan : "free",
           billingStatus: prev.isAuthenticated ? prev.billingStatus : "unknown",
           canUseCloudTranscription: prev.isAuthenticated ? prev.canUseCloudTranscription : false,

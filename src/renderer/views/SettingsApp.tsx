@@ -54,14 +54,22 @@ import { modelOptions } from "../design/source";
 import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 import { I18nProvider, displayLanguageOptions, htmlLang, translate, useT } from "../lib/i18n";
+import { capture, identifyUserEmail, resetAnalyticsIdentity } from "../services/analytics";
 
 const log = createRendererLogger("settings-ui");
 const ENTITLEMENT_REFRESH_MS = 60_000;
 const SHORTCUT_TEST_AUDIO_BITS_PER_SECOND = 128_000;
 const canSkipOnboarding = import.meta.env.DEV;
 
+function captureUpgradeClicked(properties: Record<string, unknown>): void {
+  // Privacy: never send user text, emails, URLs, tokens, or secrets to analytics.
+  // Upgrade analytics may include only safe CTA, plan, interval, and app metadata.
+  capture("upgrade_clicked", properties);
+}
+
 const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   isAuthenticated: false,
+  accountEmail: null,
   billingPlan: "free",
   billingStatus: "unknown",
   canUseCloudTranscription: false,
@@ -526,6 +534,28 @@ function hotkeyModeOptions(t: ReturnType<typeof useT>): Array<{
   ];
 }
 
+function pasteModeOptions(): Array<{
+  value: AppSettings["cleanupMode"];
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}> {
+  return [
+    {
+      value: "fast",
+      label: "Fast",
+      description: "Paste immediately, then update the text after cleanup finishes.",
+      icon: Copy,
+    },
+    {
+      value: "accurate",
+      label: "Clean",
+      description: "Wait for cleanup first, then paste the polished text once.",
+      icon: Sparkles,
+    },
+  ];
+}
+
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
@@ -609,6 +639,12 @@ export function SettingsApp() {
     document.documentElement.lang = htmlLang(settings?.displayLanguage ?? "en");
   }, [settings?.displayLanguage]);
 
+  useEffect(() => {
+    if (entitlement.isAuthenticated && entitlement.accountEmail) {
+      identifyUserEmail(entitlement.accountEmail);
+    }
+  }, [entitlement.accountEmail, entitlement.isAuthenticated]);
+
   async function syncEntitlement(force = false) {
     const synced = await window.electronAPI.syncEntitlement(force);
     setEntitlement(synced.entitlements);
@@ -680,10 +716,13 @@ export function SettingsApp() {
 
   async function clearSession() {
     await window.electronAPI.clearSessionToken();
+    resetAnalyticsIdentity();
     await syncEntitlement(true);
   }
 
   async function startCheckout(plan: PaidPlan, interval: BillingInterval) {
+    // Privacy: checkout analytics includes only safe plan/interval metadata, never checkout URLs or user identity.
+    capture("checkout_started", { plan, interval });
     const session = await window.electronAPI.startCheckout({ plan, interval });
     await syncEntitlement(true);
     return session;
@@ -796,6 +835,10 @@ export function SettingsApp() {
               variant="glass"
               className="voxly-upgrade-card__button"
               onClick={() => {
+                captureUpgradeClicked({
+                  source: "sidebar_upgrade_card",
+                  currentPlan: entitlement.billingPlan,
+                });
                 setSettingsDefaultTab("account");
                 setActiveSection("settings");
               }}
@@ -861,7 +904,7 @@ export function SettingsApp() {
               {entitlement.isAuthenticated ? (
                 <button
                   type="button"
-                  className="voxly-profile__menu-item"
+                  className="voxly-profile__menu-item voxly-profile__menu-item--signout"
                   onClick={() => { void clearSession(); setProfileMenuOpen(false); }}
                 >
                   <LogOut size={14} />
@@ -870,7 +913,7 @@ export function SettingsApp() {
               ) : (
                 <button
                   type="button"
-                  className="voxly-profile__menu-item"
+                  className="voxly-profile__menu-item voxly-profile__menu-item--signin"
                   onClick={() => { void window.electronAPI.openWebRoute("signin"); setProfileMenuOpen(false); }}
                 >
                   <LogIn size={14} />
@@ -1032,7 +1075,13 @@ function UsageLimitBanner({ usage }: { usage: WeeklyUsageStatus }) {
         <strong>{title}</strong>
         <p>{detail}</p>
       </div>
-      <TextButton variant="primary" onClick={() => window.electronAPI.openWebRoute("pricing")}>
+      <TextButton
+        variant="primary"
+        onClick={() => {
+          captureUpgradeClicked({ source: "usage_limit_banner" });
+          window.electronAPI.openWebRoute("pricing");
+        }}
+      >
         <Star size={15} />
         {t("overlay.upgrade")}
       </TextButton>
@@ -1435,6 +1484,12 @@ function SettingsPage({
   }
 
   async function handleStartCheckout(plan: PaidPlan) {
+    captureUpgradeClicked({
+      source: "pricing_card",
+      plan,
+      interval: billingInterval,
+      currentPlan: entitlement.billingPlan,
+    });
     setCheckoutBusy(plan);
     setAccountMessage("");
     try {
@@ -1449,11 +1504,47 @@ function SettingsPage({
 
   return (
     <div className="voxly-page">
-      {/* Apple HIG toolbar tab bar */}
-      <div className="sp-toolbar" role="tablist" aria-label="Settings sections">
-        <SettingsTabBtn id="general" label="General" icon={Settings} active={activeTab === "general"} onClick={() => setActiveTab("general")} />
-        <SettingsTabBtn id="account" label="Account" icon={CreditCard} active={activeTab === "account"} onClick={() => setActiveTab("account")} />
-        <SettingsTabBtn id="privacy" label="Privacy" icon={Shield} active={activeTab === "privacy"} onClick={() => setActiveTab("privacy")} />
+      {/* Apple HIG toolbar row with account status on account tab */}
+      <div className="sp-toolbar-row">
+        <div className="sp-toolbar" role="tablist" aria-label="Settings sections">
+          <SettingsTabBtn id="general" label="General" icon={Settings} active={activeTab === "general"} onClick={() => setActiveTab("general")} />
+          <SettingsTabBtn id="account" label="Account" icon={CreditCard} active={activeTab === "account"} onClick={() => setActiveTab("account")} />
+          <SettingsTabBtn id="privacy" label="Privacy" icon={Shield} active={activeTab === "privacy"} onClick={() => setActiveTab("privacy")} />
+        </div>
+
+        {activeTab === "account" && (
+          <div className="account-status account-status--inline">
+            <div className="account-status__avatar">
+              <UserCircle size={24} />
+            </div>
+            <div className="account-status__info">
+              <span className="account-status__name">
+                {settings.agentName || "Your account"}
+              </span>
+              <span className="account-status__plan">
+                {formatPlanLabel(entitlement.billingPlan, t)}
+                {entitlement.billingStatus !== "unknown" && ` · ${entitlement.billingStatus.replace(/_/g, " ")}`}
+              </span>
+            </div>
+            <div className="account-status__actions">
+              <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
+                <RefreshCw size={15} />
+                Refresh
+              </TextButton>
+              {entitlement.isAuthenticated ? (
+                <TextButton variant="quiet" disabled={accountBusy} onClick={() => void handleSignOut()}>
+                  <LogOut size={15} />
+                  Sign Out
+                </TextButton>
+              ) : (
+                <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("signin")}>
+                  <LogIn size={15} />
+                  Sign In
+                </TextButton>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* General ── name, hotkey, mode, cleanup, updates */}
@@ -1527,6 +1618,41 @@ function SettingsPage({
             </label>
           </div>
 
+          <div className="settings-row settings-row--stacked">
+            <div>
+              <h3>Paste mode</h3>
+              <p>Choose whether Dicta Fun pastes instantly or waits for cleaned text first.</p>
+            </div>
+            <div className="settings-mode-options" role="radiogroup" aria-label="Paste mode">
+              {pasteModeOptions().map((option) => {
+                const Icon = option.icon;
+                const disabled = !settings.cleanupEnabled || !entitlement.canUseCleanup;
+                return (
+                  <label
+                    key={option.value}
+                    className={cn(
+                      "settings-mode-option",
+                      settings.cleanupMode === option.value && "settings-mode-option--active",
+                      disabled && "settings-mode-option--disabled",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="paste-mode"
+                      value={option.value}
+                      checked={settings.cleanupMode === option.value}
+                      disabled={disabled}
+                      onChange={() => void onPatchSettings({ cleanupMode: option.value })}
+                    />
+                    <Icon size={17} />
+                    <span>{option.label}</span>
+                    <small>{option.description}</small>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="settings-row">
             <div>
               <h3>App version</h3>
@@ -1546,6 +1672,19 @@ function SettingsPage({
               )}
             </div>
           </div>
+
+          {canSkipOnboarding && (
+            <div className="settings-row">
+              <div>
+                <h3>Developer onboarding</h3>
+                <p>Reset setup completion and show the onboarding flow again.</p>
+              </div>
+              <TextButton variant="quiet" onClick={() => void onPatchSettings({ onboardingComplete: false })}>
+                <RefreshCw size={16} />
+                Rerun Onboarding
+              </TextButton>
+            </div>
+          )}
 
           <div className="settings-row">
             <div>
@@ -1568,39 +1707,6 @@ function SettingsPage({
       {/* Account ── plan status + pricing cards */}
       {activeTab === "account" && (
         <div id="sp-panel-account" role="tabpanel" aria-labelledby="sp-tab-account">
-          {/* Current plan status bar */}
-          <div className="account-status">
-            <div className="account-status__avatar">
-              <UserCircle size={24} />
-            </div>
-            <div className="account-status__info">
-              <span className="account-status__name">
-                {settings.agentName || "Your account"}
-              </span>
-              <span className="account-status__plan">
-                {formatPlanLabel(entitlement.billingPlan, t)}
-                {entitlement.billingStatus !== "unknown" && ` · ${entitlement.billingStatus.replace(/_/g, " ")}`}
-              </span>
-            </div>
-            <div className="account-status__actions">
-              <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
-                <RefreshCw size={15} />
-                Refresh
-              </TextButton>
-              {entitlement.isAuthenticated ? (
-                <TextButton variant="quiet" disabled={accountBusy} onClick={() => void handleSignOut()}>
-                  <LogOut size={15} />
-                  Sign Out
-                </TextButton>
-              ) : (
-                <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("signin")}>
-                  <LogIn size={15} />
-                  Sign In
-                </TextButton>
-              )}
-            </div>
-          </div>
-
           {/* Billing interval toggle */}
           <div className="pricing-billing-toggle">
             <span className={cn("pricing-billing-toggle__label", billingInterval === "monthly" && "pricing-billing-toggle__label--active")}>
@@ -1638,7 +1744,14 @@ function SettingsPage({
               <div className="pricing-card__cta">
                 <TextButton
                   disabled={entitlement.billingPlan === "free"}
-                  onClick={() => window.electronAPI.openWebRoute("pricing")}
+                  onClick={() => {
+                    captureUpgradeClicked({
+                      source: "pricing_card",
+                      plan: "free",
+                      currentPlan: entitlement.billingPlan,
+                    });
+                    window.electronAPI.openWebRoute("pricing");
+                  }}
                 >
                   {entitlement.billingPlan === "free" ? "Current plan" : "Download"}
                 </TextButton>
@@ -1857,6 +1970,13 @@ const onboardingSteps: Array<{
     summary: "First hold the shortcut while speaking, then try pressing once to start and once to stop. Each test transcribes here.",
   },
   {
+    id: "paste-mode",
+    eyebrow: "Paste Mode",
+    title: "Try both paste modes.",
+    summary: "Fast shows text immediately and updates it after cleanup. Clean waits, then pastes the polished version once.",
+    icon: Sparkles,
+  },
+  {
     id: "finish",
     eyebrow: "Ready",
     title: "Ready from anywhere.",
@@ -1879,15 +1999,21 @@ function OnboardingFlow({
   const [stepIndex, setStepIndex] = useState(0);
   const [micCheck, setMicCheck] = useState<"idle" | "checking" | "granted" | "denied">("idle");
   const [shortcutComplete, setShortcutComplete] = useState(false);
+  const [pasteModeComplete, setPasteModeComplete] = useState(false);
+  const [onboardingTranscript, setOnboardingTranscript] = useState("");
   const step = onboardingSteps[stepIndex];
   const StepIcon = step.icon;
   const isLast = stepIndex === onboardingSteps.length - 1;
   const canGoBack = stepIndex > 0;
-  const canContinue = step.id !== "hotkey" || shortcutComplete;
+  const canContinue =
+    (step.id !== "hotkey" || shortcutComplete) &&
+    (step.id !== "paste-mode" || pasteModeComplete);
 
   async function completeOnboarding() {
     log.info("Completing onboarding");
     await onPatchSettings({ onboardingComplete: true });
+    // Privacy: onboarding analytics records completion only, never user-entered settings or trial transcript text.
+    capture("onboarding_completed", { completedStep: step.id, skipped: step.id !== "finish" });
   }
 
   async function checkMicrophone() {
@@ -1955,6 +2081,15 @@ function OnboardingFlow({
                 settings={settings}
                 runtime={runtime}
                 onCompletionChange={setShortcutComplete}
+                onTranscriptCaptured={setOnboardingTranscript}
+                onPatchSettings={onPatchSettings}
+              />
+            )}
+            {step.id === "paste-mode" && (
+              <PasteModeTeachStep
+                settings={settings}
+                sampleTranscript={onboardingTranscript}
+                onCompletionChange={setPasteModeComplete}
                 onPatchSettings={onPatchSettings}
               />
             )}
@@ -1987,6 +2122,11 @@ function OnboardingFlow({
               ) : step.id === "hotkey" && !shortcutComplete ? (
                 <>
                   Complete Both Tests
+                  <ArrowRight size={17} />
+                </>
+              ) : step.id === "paste-mode" && !pasteModeComplete ? (
+                <>
+                  Try Both Modes
                   <ArrowRight size={17} />
                 </>
               ) : (
@@ -2111,11 +2251,13 @@ function HotkeyTeachStep({
   settings,
   runtime,
   onCompletionChange,
+  onTranscriptCaptured,
   onPatchSettings,
 }: {
   settings: AppSettings;
   runtime: RuntimeStatus;
   onCompletionChange: (complete: boolean) => void;
+  onTranscriptCaptured: (transcript: string) => void;
   onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
 }) {
   type TrialId = "push" | "tap";
@@ -2241,6 +2383,7 @@ function HotkeyTeachStep({
           }
 
           updateTrial(stoppedTrial, { status: "done", transcript: result.text, error: "" });
+          onTranscriptCaptured(result.text);
           if (stoppedTrial === "push") {
             setActiveTrial("tap");
           }
@@ -2273,7 +2416,7 @@ function HotkeyTeachStep({
         error: "Could not access microphone. Check permissions, then press the shortcut again.",
       });
     }
-  }, [settings.selectedModel, updateTrial]);
+  }, [onTranscriptCaptured, settings.selectedModel, updateTrial]);
 
   const stopTrialRecording = useCallback(() => {
     if (startInFlightRef.current && recorderRef.current?.state !== "recording") {
@@ -2464,6 +2607,208 @@ function ShortcutTrialCard({
   );
 }
 
+const PASTE_MODE_SAMPLE_TRANSCRIPT = "hey dicta fun remind alex to send the invoice tomorrow morning";
+
+function normalizePasteSample(transcript: string): string {
+  const normalized = transcript.replace(/\s+/g, " ").trim();
+  return normalized || PASTE_MODE_SAMPLE_TRANSCRIPT;
+}
+
+function cleanPasteSample(transcript: string): string {
+  const normalized = normalizePasteSample(transcript);
+  const sentence = `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+function PasteModeTeachStep({
+  settings,
+  sampleTranscript,
+  onCompletionChange,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  sampleTranscript: string;
+  onCompletionChange: (complete: boolean) => void;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  type PasteTrialId = AppSettings["cleanupMode"];
+  type PasteTrialState = {
+    status: "waiting" | "raw" | "cleaning" | "done";
+    output: string;
+  };
+
+  const [trialStates, setTrialStates] = useState<Record<PasteTrialId, PasteTrialState>>({
+    fast: { status: "waiting", output: "" },
+    accurate: { status: "waiting", output: "" },
+  });
+  const timersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const rawTranscript = normalizePasteSample(sampleTranscript);
+  const cleanedTranscript = cleanPasteSample(rawTranscript);
+  const fastDone = trialStates.fast.status === "done";
+  const cleanDone = trialStates.accurate.status === "done";
+  const bothDone = fastDone && cleanDone;
+  const trialRunning = Object.values(trialStates).some((state) => state.status === "raw" || state.status === "cleaning");
+
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach((timer) => clearTimeout(timer));
+    timersRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    onCompletionChange(bothDone);
+  }, [bothDone, onCompletionChange]);
+
+  useEffect(() => clearTimers, [clearTimers]);
+
+  const updateTrial = useCallback((trial: PasteTrialId, patch: Partial<PasteTrialState>) => {
+    setTrialStates((current) => ({
+      ...current,
+      [trial]: {
+        ...current[trial],
+        ...patch,
+      },
+    }));
+  }, []);
+
+  const runTrial = useCallback((trial: PasteTrialId) => {
+    if (trialRunning) return;
+    void onPatchSettings({ cleanupEnabled: true, cleanupMode: trial });
+
+    if (trial === "fast") {
+      updateTrial("fast", { status: "raw", output: rawTranscript });
+      timersRef.current.push(
+        setTimeout(() => updateTrial("fast", { status: "cleaning", output: rawTranscript }), 650),
+        setTimeout(() => updateTrial("fast", { status: "done", output: cleanedTranscript }), 1450),
+      );
+      return;
+    }
+
+    updateTrial("accurate", { status: "cleaning", output: "" });
+    timersRef.current.push(
+      setTimeout(() => updateTrial("accurate", { status: "done", output: cleanedTranscript }), 1100),
+    );
+  }, [cleanedTranscript, onPatchSettings, rawTranscript, trialRunning, updateTrial]);
+
+  return (
+    <div className="paste-mode-teach">
+      <div className="paste-mode-teach__sample glass-panel-subtle">
+        <span>Test sentence</span>
+        <p>{rawTranscript}</p>
+      </div>
+
+      <div className="paste-mode-teach__trials">
+        <PasteModeTrialCard
+          mode="fast"
+          title="Fast"
+          description="Raw text appears right away, then cleanup replaces it."
+          state={trialStates.fast}
+          disabled={trialRunning || fastDone}
+          onRun={() => runTrial("fast")}
+        />
+        <PasteModeTrialCard
+          mode="accurate"
+          title="Clean"
+          description="Dicta Fun waits for cleanup, then shows the polished result."
+          state={trialStates.accurate}
+          disabled={trialRunning || cleanDone}
+          onRun={() => runTrial("accurate")}
+        />
+      </div>
+
+      {bothDone && (
+        <div className="paste-mode-teach__pick">
+          <p className="paste-mode-teach__pick-label">Choose your default paste mode</p>
+          <div className="settings-mode-options" role="radiogroup" aria-label="Default paste mode">
+            {pasteModeOptions().map((option) => {
+              const Icon = option.icon;
+              return (
+                <label
+                  key={option.value}
+                  className={cn("settings-mode-option", settings.cleanupMode === option.value && "settings-mode-option--active")}
+                >
+                  <input
+                    type="radio"
+                    name="paste-mode-onboarding"
+                    value={option.value}
+                    checked={settings.cleanupMode === option.value}
+                    onChange={() => void onPatchSettings({ cleanupEnabled: true, cleanupMode: option.value })}
+                  />
+                  <Icon size={17} />
+                  <span>{option.label}</span>
+                  <small>{option.description}</small>
+                </label>
+              );
+            })}
+          </div>
+          <p className="paste-mode-teach__hint">You can change this anytime in Settings.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PasteModeTrialCard({
+  mode,
+  title,
+  description,
+  state,
+  disabled,
+  onRun,
+}: {
+  mode: AppSettings["cleanupMode"];
+  title: string;
+  description: string;
+  state: {
+    status: "waiting" | "raw" | "cleaning" | "done";
+    output: string;
+  };
+  disabled: boolean;
+  onRun: () => void;
+}) {
+  const Icon = mode === "fast" ? Copy : Sparkles;
+  const statusLabel = state.status === "waiting"
+    ? "Not tested"
+    : state.status === "raw"
+      ? "Raw pasted"
+      : state.status === "cleaning"
+        ? mode === "fast" ? "Cleaning after paste" : "Waiting for cleanup"
+        : "Complete";
+  const placeholder = state.status === "waiting"
+    ? "Run this test to see what appears in the target app."
+    : state.status === "cleaning" && mode === "accurate"
+      ? "Waiting for cleaned text..."
+      : "";
+  const dotState = state.status === "done" ? "complete" : state.status === "waiting" ? "idle" : "processing";
+
+  return (
+    <article className={cn("paste-mode-teach__trial glass-panel-subtle", state.status === "done" && "paste-mode-teach__trial--done")}>
+      <div className="paste-mode-teach__trial-header">
+        <Icon size={18} />
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+        {state.status === "done" && <CheckCircle2 size={17} className="paste-mode-teach__check" />}
+      </div>
+      <div className="paste-mode-teach__status">
+        <span className="status-dot" data-state={dotState} />
+        <span>{statusLabel}</span>
+      </div>
+      <textarea
+        className="paste-mode-teach__textarea"
+        readOnly
+        value={state.output}
+        placeholder={placeholder}
+        aria-label={`${title} paste output`}
+      />
+      <TextButton variant="glass" disabled={disabled} onClick={onRun}>
+        <Icon size={17} />
+        {state.status === "done" ? "Tested" : `Test ${title}`}
+      </TextButton>
+    </article>
+  );
+}
+
 function preferredRecordingMimeType(): string {
   if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
   if (MediaRecorder.isTypeSupported("audio/webm")) return "audio/webm";
@@ -2596,6 +2941,10 @@ function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: Run
         <div className="finish-card__status-item">
           <dt>Mode</dt>
           <dd>{settings.mode === "tap-to-talk" ? "Tap to talk" : "Push to talk"}</dd>
+        </div>
+        <div className="finish-card__status-item">
+          <dt>Paste</dt>
+          <dd>{settings.cleanupMode === "fast" ? "Fast" : "Clean"}</dd>
         </div>
         <div className="finish-card__status-item">
           <dt>AI Model</dt>

@@ -158,7 +158,11 @@ export class WhisperService {
       // Whisper emits "[BLANK_AUDIO]" (and similar) when no speech was detected.
       // Return empty string so callers can silently skip pasting.
       const text = /^\[blank_audio\]$/i.test(rawText) ? "" : rawText;
-      log.info("Whisper transcription completed", { text });
+      const logTranscripts = process.env.DICTAFUN_LOG_TRANSCRIPTS === "1";
+      log.info("Whisper transcription completed", {
+        ...(logTranscripts ? { text } : {}),
+        textLength: text.length,
+      });
       return text;
     } finally {
       await rm(audioPath, { force: true });

@@ -1,3 +1,5 @@
+import { sanitizeLogValue } from "../../shared/redaction";
+
 type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 
 const LOG_LEVELS: Record<LogLevel, number> = {
@@ -52,7 +54,7 @@ const logToConsole = (level: LogLevel, message: string, meta?: unknown, scope?: 
         ? console.warn
         : console.log;
   if (meta !== undefined) {
-    consoleFn(`${levelTag}${scopeTag} ${message}`, meta);
+    consoleFn(`${levelTag}${scopeTag} ${message}`, sanitizeLogValue(meta));
   } else {
     consoleFn(`${levelTag}${scopeTag} ${message}`);
   }
@@ -64,7 +66,7 @@ const log = async (level: LogLevel, message: string, meta?: unknown, scope?: str
 
   if (typeof window !== "undefined" && window.electronAPI?.log) {
     try {
-      await window.electronAPI.log({ level, message: String(message), meta, scope, source: "renderer" });
+      await window.electronAPI.log({ level, message: String(message), meta: sanitizeLogValue(meta), scope, source: "renderer" });
       return;
     } catch {
       // fall back to console

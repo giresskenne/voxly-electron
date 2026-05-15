@@ -8,6 +8,11 @@ const log = createMainLogger("globe-key");
 
 const BINARY_NAME = "macos-globe-listener";
 
+function logFnFlow(message: string, meta?: unknown): void {
+  if (app.isPackaged) return;
+  log.info(`[fn-flow] ${message}`, meta);
+}
+
 /**
  * Spawns the macos-globe-listener binary (arm64 Swift process) and emits
  * callbacks when the Globe / Fn key is pressed and released.
@@ -55,9 +60,17 @@ export class GlobeKeyManager {
       for (const line of chunk.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) {
         if (line === "FN_DOWN") {
           log.debug("Globe/Fn key down");
+          logFnFlow("native listener emitted FN_DOWN", {
+            hasHandlers: Boolean(this.handlers),
+            pid: this.child?.pid,
+          });
           this.handlers?.onDown();
         } else if (line === "FN_UP") {
           log.debug("Globe/Fn key up");
+          logFnFlow("native listener emitted FN_UP", {
+            hasHandlers: Boolean(this.handlers),
+            pid: this.child?.pid,
+          });
           this.handlers?.onUp?.();
         }
       }

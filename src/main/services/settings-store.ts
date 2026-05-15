@@ -11,6 +11,7 @@ const defaults: AppSettings = {
   hotkey: process.platform === "darwin" ? "GLOBE" : "Control+Shift+Space",
   mode: "tap-to-talk",
   transcriptionMode: "local",
+  cleanupMode: "accurate",
   selectedModel: "base",
   language: "en",
   displayLanguage: "en",
@@ -87,6 +88,9 @@ export class SettingsStore {
     if (next.displayLanguage) {
       next.displayLanguage = normalizeDisplayLanguage(next.displayLanguage);
     }
+    if (next.cleanupMode) {
+      next.cleanupMode = normalizeCleanupMode(next.cleanupMode);
+    }
     return next;
   }
 
@@ -108,6 +112,10 @@ export class SettingsStore {
 
 function normalizeDisplayLanguage(language: string): DisplayLanguage {
   return language === "fr-FR" ? "fr-FR" : "en";
+}
+
+function normalizeCleanupMode(mode: string): AppSettings["cleanupMode"] {
+  return mode === "fast" ? "fast" : "accurate";
 }
 
 export const settingsStore = new SettingsStore();

@@ -1,4 +1,4 @@
-## [1.0.5](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5) (2026-05-13)
+## [1.0.5-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 
 ### Bug Fixes
