@@ -32,6 +32,16 @@
   --glass-shadow: 0 8px 32px rgba(7, 11, 63, 0.08), 0 2px 8px rgba(7, 11, 63, 0.04);
   --glass-shadow-elevated: 0 16px 48px rgba(7, 11, 63, 0.12), 0 4px 16px rgba(7, 11, 63, 0.06);
   --glass-glow: 0 0 40px rgba(37, 99, 255, 0.12);
+  --glass-blur: 24px;
+  --glass-blur-strong: 32px;
+  --glass-blur-subtle: 16px;
+  --glass-radius: 22px;
+  --onboarding-card-bg: color-mix(in srgb, var(--glass-bg-strong) 84%, white);
+  --onboarding-card-bg-subtle: color-mix(in srgb, var(--glass-bg-subtle) 84%, white);
+  --onboarding-card-border: rgba(60, 60, 67, 0.13);
+  --onboarding-card-shadow: 0 2px 8px rgba(7, 11, 63, 0.06), 0 1px 2px rgba(7, 11, 63, 0.04);
+  --onboarding-card-divider: rgba(60, 60, 67, 0.08);
+  --onboarding-card-radius: 12px;
   --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
 }
 
@@ -42,8 +52,8 @@
   position: relative;
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow), var(--glass-inner-shadow);
-  backdrop-filter: blur(24px) saturate(1.8);
-  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
 }
 
 .glass-panel {
@@ -53,15 +63,15 @@
 .glass-panel-strong,
 .glass-btn {
   background: var(--glass-bg-strong);
-  backdrop-filter: blur(32px) saturate(2);
-  -webkit-backdrop-filter: blur(32px) saturate(2);
+  backdrop-filter: blur(var(--glass-blur-strong)) saturate(2);
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(2);
 }
 
 .glass-panel-subtle {
   background: var(--glass-bg-subtle);
   border-color: var(--glass-border-subtle);
-  backdrop-filter: blur(16px) saturate(1.5);
-  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  backdrop-filter: blur(var(--glass-blur-subtle)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--glass-blur-subtle)) saturate(1.5);
 }
 
 .glass-panel::before,
@@ -86,6 +96,26 @@
 .glass-btn:hover {
   background: var(--glass-bg);
   box-shadow: var(--glass-shadow), var(--glass-inner-shadow), var(--glass-glow);
+}
+
+.glass-card-hover {
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+}
+
+.glass-card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--glass-shadow-elevated), var(--glass-inner-shadow), var(--glass-glow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-card-hover {
+    transition: none;
+  }
+
+  .glass-card-hover:hover {
+    transform: none;
+    box-shadow: var(--glass-shadow), var(--glass-inner-shadow);
+  }
 }
 
 @keyframes pulse-glow {
