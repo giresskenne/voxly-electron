@@ -1,3 +1,10 @@
+# [1.1.0-feat-rearchitecture-the-app-flow-for-speed.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.5...v1.1.0-feat-rearchitecture-the-app-flow-for-speed.1) (2026-05-15)
+
+
+### Features
+
+* polish onboarding flow ([dfaa40e](https://github.com/giresskenne/voxly-electron/commit/dfaa40e4a652f9f68cec6e185138384cd3e630b1))
+
 ## [1.0.5-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 
