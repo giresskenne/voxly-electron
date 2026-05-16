@@ -6,6 +6,11 @@ import { createMainLogger } from "./debug-log";
 const isDev = !app.isPackaged;
 const log = createMainLogger("windows");
 
+function logFnFlow(message: string, meta?: unknown): void {
+  if (!isDev) return;
+  log.info(`[fn-flow] ${message}`, meta);
+}
+
 // Follows the same pattern as voxly/src/helpers/dragManager.js
 class DragManager {
   private isDragging = false;
@@ -148,6 +153,7 @@ export class WindowManager {
     this.overlay.on("closed", () => {
       log.info("Overlay window closed");
       this.dragManager.cleanup();
+      this.overlay = null;
     });
     return this.overlay;
   }
@@ -183,7 +189,10 @@ export class WindowManager {
       log.info("Settings ready to show");
       this.settings?.show();
     });
-    this.settings.on("closed", () => log.info("Settings window closed"));
+    this.settings.on("closed", () => {
+      log.info("Settings window closed");
+      this.settings = null;
+    });
     this.settings.webContents.setWindowOpenHandler(({ url }) => {
       log.debug("Opening external URL from settings", { url });
       shell.openExternal(url);
@@ -200,6 +209,10 @@ export class WindowManager {
 
   sendDictationToggle(): void {
     log.debug("Sending dictation toggle to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
+    logFnFlow("window manager sending dictation:toggle", {
+      hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()),
+      overlayVisible: Boolean(this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible()),
+    });
     this.showDictationPanel();
     this.overlay?.webContents.send("dictation:toggle");
   }
@@ -211,6 +224,10 @@ export class WindowManager {
 
   sendDictationStart(): void {
     log.debug("Sending dictation start to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
+    logFnFlow("window manager sending dictation:start", {
+      hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()),
+      overlayVisible: Boolean(this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible()),
+    });
     this.showDictationPanel();
     this.overlay?.webContents.send("dictation:start");
   }
@@ -222,6 +239,10 @@ export class WindowManager {
 
   sendDictationStop(): void {
     log.debug("Sending dictation stop to overlay", { hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()) });
+    logFnFlow("window manager sending dictation:stop", {
+      hasOverlay: Boolean(this.overlay && !this.overlay.isDestroyed()),
+      overlayVisible: Boolean(this.overlay && !this.overlay.isDestroyed() && this.overlay.isVisible()),
+    });
     this.overlay?.webContents.send("dictation:stop");
   }
 
@@ -277,6 +298,7 @@ export class WindowManager {
   showDictationPanel(options: { focus?: boolean } = {}): void {
     if (!this.overlay || this.overlay.isDestroyed()) return;
 
+    const wasVisible = this.overlay.isVisible();
     this.repositionOverlayToCursorDisplay();
 
     if (this.overlay.isMinimized()) {
@@ -296,6 +318,12 @@ export class WindowManager {
     }
 
     enforceAlwaysOnTop(this.overlay);
+    logFnFlow("overlay show requested", {
+      wasVisible,
+      isVisible: this.overlay.isVisible(),
+      focus: Boolean(options.focus),
+      bounds: this.overlay.getBounds(),
+    });
   }
 
   hideOverlayForHour(): void {
@@ -319,9 +347,17 @@ export class WindowManager {
   async prepareOverlayForPaste(): Promise<void> {
     if (!this.overlay || this.overlay.isDestroyed()) return;
 
+    logFnFlow("preparing overlay for paste", {
+      isFocused: this.overlay.isFocused(),
+      isVisible: this.overlay.isVisible(),
+      platform: process.platform,
+    });
     this.setOverlayInteractive(false);
 
-    if (!this.overlay.isFocused()) return;
+    if (!this.overlay.isFocused()) {
+      logFnFlow("overlay was not focused before paste; no focus handoff needed");
+      return;
+    }
 
     if (process.platform === "darwin") {
       // Hiding a focused panel gives macOS a chance to reactivate the app that
@@ -332,11 +368,13 @@ export class WindowManager {
         this.overlay.showInactive();
         enforceAlwaysOnTop(this.overlay);
       }
+      logFnFlow("macOS overlay focus handoff completed for paste");
       return;
     }
 
     this.overlay.blur();
     await delay(80);
+    logFnFlow("overlay blur handoff completed for paste");
   }
 
   private repositionOverlayToCursorDisplay(): void {

@@ -65,11 +65,14 @@ export class GroqTranscriptionService {
   }
 
   private resolveSegments(buffer: ArrayBuffer, chunks: AudioChunk[]): AudioChunk[] {
+    const usableChunks = chunks.filter((chunk) => chunk.buffer.byteLength > 0);
+    // Use the actual MIME from the recorded chunks so the upload label matches the content.
+    const primaryMimeType = usableChunks[0]?.mimeType || "audio/webm";
+
     if (buffer.byteLength <= LARGE_AUDIO_THRESHOLD_BYTES) {
-      return [{ buffer, mimeType: "audio/webm" }];
+      return [{ buffer, mimeType: primaryMimeType }];
     }
 
-    const usableChunks = chunks.filter((chunk) => chunk.buffer.byteLength > 0);
     if (usableChunks.length > 1) {
       log.debug("Using renderer-provided 240s audio chunks for large Groq upload", {
         chunkCount: usableChunks.length,
@@ -81,7 +84,7 @@ export class GroqTranscriptionService {
     log.warn("Large audio exceeded chunk threshold but no valid chunk boundaries were provided; uploading as one file", {
       byteLength: buffer.byteLength,
     });
-    return [{ buffer, mimeType: "audio/webm" }];
+    return [{ buffer, mimeType: primaryMimeType }];
   }
 
   private async uploadBackendSegment(chunk: AudioChunk, index: number, settings: AppSettings): Promise<string> {
@@ -146,8 +149,10 @@ export class GroqTranscriptionService {
 
   private createTranscriptionForm(chunk: AudioChunk, index: number, settings: AppSettings): FormData {
     const form = new FormData();
-    const file = new Blob([new Uint8Array(chunk.buffer).slice()], { type: chunk.mimeType || "audio/webm" });
-    form.append("file", file, `audio-${index + 1}.webm`);
+    const mimeType = chunk.mimeType || "audio/webm";
+    const ext = mimeType.startsWith("audio/wav") ? "wav" : "webm";
+    const file = new Blob([new Uint8Array(chunk.buffer).slice()], { type: mimeType });
+    form.append("file", file, `audio-${index + 1}.${ext}`);
     form.append("model", GROQ_MODEL);
     // Let the model detect the spoken language so mixed-language dictation is preserved.
 

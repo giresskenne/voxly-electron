@@ -57,6 +57,8 @@ jobs:
           VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
           VITE_DESKTOP_PRERELEASE_UPDATES_URL: ${{ vars.VITE_DESKTOP_PRERELEASE_UPDATES_URL || secrets.VITE_DESKTOP_PRERELEASE_UPDATES_URL }}
           VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
+          VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
         run: |
           set -euo pipefail
           updates_url="${VITE_DESKTOP_UPDATES_URL:-}"
@@ -84,6 +86,12 @@ jobs:
             printf 'VITE_DESKTOP_UPDATES_URL=%s\n' "$updates_url"
             if [[ -n "${VITE_DESKTOP_DOWNLOAD_BASE_URL:-}" ]]; then
               printf 'VITE_DESKTOP_DOWNLOAD_BASE_URL=%s\n' "$VITE_DESKTOP_DOWNLOAD_BASE_URL"
+            fi
+            if [[ -n "${VITE_POSTHOG_KEY:-}" ]]; then
+              printf 'VITE_POSTHOG_KEY=%s\n' "$VITE_POSTHOG_KEY"
+            fi
+            if [[ -n "${VITE_POSTHOG_HOST:-}" ]]; then
+              printf 'VITE_POSTHOG_HOST=%s\n' "$VITE_POSTHOG_HOST"
             fi
             printf 'VOXLY_DEBUG=0\n'
           } > resources/runtime.env
@@ -183,6 +191,8 @@ jobs:
           VITE_DESKTOP_UPDATES_URL: ${{ vars.VITE_DESKTOP_UPDATES_URL || secrets.VITE_DESKTOP_UPDATES_URL }}
           VITE_DESKTOP_PRERELEASE_UPDATES_URL: ${{ vars.VITE_DESKTOP_PRERELEASE_UPDATES_URL || secrets.VITE_DESKTOP_PRERELEASE_UPDATES_URL }}
           VITE_DESKTOP_DOWNLOAD_BASE_URL: ${{ vars.VITE_DESKTOP_DOWNLOAD_BASE_URL || secrets.VITE_DESKTOP_DOWNLOAD_BASE_URL }}
+          VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
+          VITE_POSTHOG_HOST: ${{ secrets.VITE_POSTHOG_HOST }}
         run: |
           $updatesUrl = $env:VITE_DESKTOP_UPDATES_URL
           if ($env:RELEASE_CHANNEL -eq "prerelease") {
@@ -208,12 +218,13 @@ jobs:
             "VOXLY_DEBUG=0"
           )
           if (-not [string]::IsNullOrWhiteSpace($env:VITE_DESKTOP_DOWNLOAD_BASE_URL)) {
-            $runtimeEnv = @(
-              "VITE_API_URL=$env:VITE_API_URL",
-              "VITE_DESKTOP_UPDATES_URL=$updatesUrl",
-              "VITE_DESKTOP_DOWNLOAD_BASE_URL=$env:VITE_DESKTOP_DOWNLOAD_BASE_URL",
-              "VOXLY_DEBUG=0"
-            )
+            $runtimeEnv += "VITE_DESKTOP_DOWNLOAD_BASE_URL=$env:VITE_DESKTOP_DOWNLOAD_BASE_URL"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:VITE_POSTHOG_KEY)) {
+            $runtimeEnv += "VITE_POSTHOG_KEY=$env:VITE_POSTHOG_KEY"
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:VITE_POSTHOG_HOST)) {
+            $runtimeEnv += "VITE_POSTHOG_HOST=$env:VITE_POSTHOG_HOST"
           }
 
           $runtimeEnv | Set-Content -Path resources/runtime.env -Encoding utf8

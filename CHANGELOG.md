@@ -1,3 +1,17 @@
+# [1.1.0-feat-rearchitecture-the-app-flow-for-speed.2](https://github.com/giresskenne/voxly-electron/compare/v1.1.0-feat-rearchitecture-the-app-flow-for-speed.1...v1.1.0-feat-rearchitecture-the-app-flow-for-speed.2) (2026-05-16)
+
+
+### Bug Fixes
+
+* register dictafun protocol for macOS build ([9850032](https://github.com/giresskenne/voxly-electron/commit/9850032d231bb70ac971b7ccb5b322fa21fc136e))
+
+# [1.1.0-feat-rearchitecture-the-app-flow-for-speed.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.5...v1.1.0-feat-rearchitecture-the-app-flow-for-speed.1) (2026-05-15)
+
+
+### Features
+
+* polish onboarding flow ([dfaa40e](https://github.com/giresskenne/voxly-electron/commit/dfaa40e4a652f9f68cec6e185138384cd3e630b1))
+
 ## [1.0.5-feature-onboarding-free-weekly-limit.1](https://github.com/giresskenne/voxly-electron/compare/v1.0.4...v1.0.5-feature-onboarding-free-weekly-limit.1) (2026-05-13)
 
 

@@ -39,6 +39,7 @@ export type BillingStatus =
 
 export type EntitlementStatus = {
   isAuthenticated: boolean;
+  accountEmail: string | null;
   billingPlan: BillingPlan;
   billingStatus: BillingStatus;
   canUseCloudTranscription: boolean;
@@ -52,6 +53,7 @@ export type AppSettings = {
   hotkey: string;
   mode: "push-to-talk" | "tap-to-talk";
   transcriptionMode: "local" | "cloud";
+  cleanupMode: "accurate" | "fast";
   selectedModel: string;
   language: string;
   displayLanguage: DisplayLanguage;
@@ -87,6 +89,7 @@ export type TranscriptionRecord = {
 export type RuntimeStatus = {
   appVersion: string;
   platform: NodeJS.Platform;
+  arch: NodeJS.Architecture;
   microphone: "unknown" | "granted" | "denied" | "restricted" | "not-determined";
   accessibility: "unknown" | "granted" | "denied";
   whisper: "disabled" | "mock" | "starting" | "ready" | "missing" | "error";
@@ -123,6 +126,59 @@ export type LangMismatch = {
   detected: string;
   /** ISO 639-1 code of the configured transcription language, e.g. "fr" */
   configured: string;
+};
+
+export type CleanupStatus =
+  | "not_requested"
+  | "pending_background"
+  | "completed_replaced"
+  | "completed_unchanged"
+  | "skipped_short_text"
+  | "failed";
+
+/** Timing breakdown returned by the main-process transcription pipeline. */
+export type MainDictationTiming = {
+  transcriptionMs: number;
+  cleanupMs: number;
+  dbSaveMs: number;
+  transcriptionMode: AppSettings["transcriptionMode"];
+  cleanupMode: AppSettings["cleanupMode"];
+  cleanupEnabled: boolean;
+  cleanupSkipped: boolean;
+  cleanupStatus: CleanupStatus;
+};
+
+export type CleanupLaterResult = {
+  text: string;
+  originalText: string;
+  record: TranscriptionRecord | null;
+  timing: Pick<MainDictationTiming, "cleanupMs" | "dbSaveMs" | "cleanupMode" | "cleanupEnabled" | "cleanupSkipped" | "cleanupStatus">;
+};
+
+/**
+ * Full end-to-end dictation timing logged by the renderer after a complete
+ * dictation cycle.  Combines the main-process pipeline fields from
+ * `MainDictationTiming` with the renderer-side prep/paste measurements.
+ */
+export type FullDictationTiming = MainDictationTiming & {
+  /** Time between recorder start and stop. */
+  recordingMs: number;
+  /** Audio duration captured from recorder start to stop. */
+  audioDurationMs: number;
+  /** Blob assembly + optional WAV conversion (renderer, before IPC call). */
+  audioPrepMs: number;
+  /** Accessibility paste duration (renderer, after IPC returns). */
+  pasteMs: number;
+  /** Wall-clock ms from recorder.stop() to paste completion. */
+  totalAfterStopMs: number;
+  /** Audio payload size sent to main. */
+  audioBytes: number;
+  /** Perceived latency from stop to the first pasted text. */
+  timeToRawPasteMs: number;
+  /** Background cleanup completion time after initial paste, when fast mode is used. */
+  cleanupCompletedAfterPasteMs: number | null;
+  /** Wall-clock ms from stop to final cleanup/save/replace completion. */
+  totalFinalizationMs: number | null;
 };
 
 export type DesktopUpdateFile = {

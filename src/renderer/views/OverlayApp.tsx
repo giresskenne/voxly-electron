@@ -1,20 +1,37 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, Check, ChevronDown, ClipboardPaste, Clock, Languages, Mic, ScrollText, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AppSettings, AudioChunk, LangMismatch, PasteAttention, WeeklyUsageStatus } from "../../main/types";
+import type { AppSettings, AudioChunk, CleanupStatus, FullDictationTiming, LangMismatch, PasteAttention, WeeklyUsageStatus } from "../../main/types";
 import { TextButton } from "../components/Controls";
 import { createRendererLogger } from "../lib/debug-log";
 import { I18nProvider, useT } from "../lib/i18n";
+import { capture, type AnalyticsEventName, type DictationAnalyticsProperties } from "../services/analytics";
 
 type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
+type PillVisualState = DictationState | "hover";
+
 const log = createRendererLogger("overlay-ui");
+const FN_FLOW_TRACE = import.meta.env.DEV;
+
+function logFnFlow(message: string, meta?: unknown): void {
+  if (!FN_FLOW_TRACE) return;
+  log.info(`[fn-flow] ${message}`, meta);
+}
 
 /** localStorage key for the user's preferred microphone device ID. Empty string means auto-detect. */
 const PREF_MIC_KEY = "voxly:micDeviceId";
 
 const CLOUD_CHUNK_MS = 240_000;
 const RECORDING_AUDIO_BITS_PER_SECOND = 128_000;
-const COMPLETE_RESET_MS = 1000;
+const COMPLETE_RESET_MS = 0;
+const PILL_SIZES = {
+  idle: { width: 96, height: 7 },
+  hover: { width: 124, height: 30 },
+  recording: { width: 172, height: 36 },
+  processing: { width: 146, height: 36 },
+  complete: { width: 108, height: 30 },
+  error: { width: 96, height: 7 },
+} as const satisfies Record<PillVisualState, { width: number; height: number }>;
 /** RMS threshold (0–255) above which we treat the mic as having active voice. */
 const VOICE_RMS_THRESHOLD = 14;
 const VOICE_POLL_MS = 80;
@@ -58,6 +75,26 @@ function enableAutoTranslateMismatch(mismatch: LangMismatch): void {
 
 function normalizeComparableText(text: string): string {
   return text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function errorType(error: unknown): string {
+  return error instanceof Error && error.name ? error.name : "Error";
+}
+
+function finalizedCleanupStatus(cleanupStatus: CleanupStatus, replacement: "skipped" | "replaced" | "failed"): CleanupStatus {
+  if (cleanupStatus === "failed" || replacement === "failed") return "failed";
+  if (cleanupStatus === "skipped_short_text" || cleanupStatus === "not_requested") return cleanupStatus;
+  return replacement === "replaced" ? "completed_replaced" : "completed_unchanged";
+}
+
+function captureDictationEvent(eventName: AnalyticsEventName, properties: DictationAnalyticsProperties): void {
+  // Privacy: never send transcript text, audio, app context, selected text, URLs, tokens, or secrets.
+  // Only safe timing/mode/status metadata is allowed for dictation analytics.
+  capture(eventName, properties);
 }
 
 // ─── Sound effects ─────────────────────────────────────────────────────────────
@@ -186,10 +223,11 @@ const MicrophoneSubmenu = () => {
 
 type PillMenuProps = {
   onClose: () => void;
+  onKeepOpen: () => void;
   onPasteLastTranscript: () => void;
 };
 
-const PillContextMenu = ({ onClose, onPasteLastTranscript }: PillMenuProps) => {
+const PillContextMenu = ({ onClose, onKeepOpen, onPasteLastTranscript }: PillMenuProps) => {
   const t = useT();
   const [micOpen, setMicOpen] = useState(false);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -221,7 +259,14 @@ const PillContextMenu = ({ onClose, onPasteLastTranscript }: PillMenuProps) => {
   }, [onClose]);
 
   return (
-    <div className="pill-menu-anchor" onMouseLeave={scheduleClose} onMouseEnter={cancelClose}>
+    <div
+      className="pill-menu-anchor"
+      onMouseLeave={scheduleClose}
+      onMouseEnter={() => {
+        cancelClose();
+        onKeepOpen();
+      }}
+    >
       <motion.div
         className="pill-menu glass-panel-strong"
         initial={{ opacity: 0, y: 8, scale: 0.96 }}
@@ -320,8 +365,10 @@ export function OverlayApp() {
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const settingsRef = useRef<AppSettings | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const resetTimerRef = useRef<number | null>(null);
+  const menuCloseTimerRef = useRef<number | null>(null);
   const startInFlightRef = useRef(false);
   const stopRequestedDuringStartRef = useRef(false);
   /** Ref-tracked drag state so onClick handler always sees the latest value. */
@@ -329,6 +376,30 @@ export function OverlayApp() {
   const analyserCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const voicePollRef = useRef<number | null>(null);
+  const recordingStartedAtRef = useRef<number | null>(null);
+  const recordingStoppedAtRef = useRef<number | null>(null);
+  const lastStateRef = useRef<DictationState>("idle");
+
+  const cancelMenuClose = useCallback(() => {
+    if (menuCloseTimerRef.current === null) return;
+    window.clearTimeout(menuCloseTimerRef.current);
+    menuCloseTimerRef.current = null;
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    cancelMenuClose();
+    setMenuOpen(false);
+  }, [cancelMenuClose]);
+
+  const scheduleMenuClose = useCallback(() => {
+    cancelMenuClose();
+    menuCloseTimerRef.current = window.setTimeout(() => {
+      menuCloseTimerRef.current = null;
+      setMenuOpen(false);
+    }, 350);
+  }, [cancelMenuClose]);
+
+  useEffect(() => cancelMenuClose, [cancelMenuClose]);
 
   /** Tear down the voice-level analyser completely. */
   const cleanupVoiceDetector = useCallback(() => {
@@ -443,23 +514,38 @@ export function OverlayApp() {
     log.info("Overlay mounted");
     window.electronAPI.getSettings().then((next) => {
       log.debug("Overlay settings loaded", next);
+      settingsRef.current = next;
       setSettings(next);
     });
     window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
     const offToggle = window.electronAPI.onDictationToggle(() => {
       log.info("Received dictation toggle from main");
+      logFnFlow("renderer received dictation:toggle", {
+        state: lastStateRef.current,
+        recorderState: recorderRef.current?.state ?? null,
+      });
       void toggleDictationRef.current();
     });
     const offStart = window.electronAPI.onDictationStart(() => {
       log.info("Received dictation start from main");
+      logFnFlow("renderer received dictation:start", {
+        state: lastStateRef.current,
+        recorderState: recorderRef.current?.state ?? null,
+      });
       void startDictationRef.current();
     });
     const offStop = window.electronAPI.onDictationStop(() => {
       log.info("Received dictation stop from main");
+      logFnFlow("renderer received dictation:stop", {
+        state: lastStateRef.current,
+        recorderState: recorderRef.current?.state ?? null,
+        startInFlight: startInFlightRef.current,
+      });
       stopDictationRef.current();
     });
     const offSettings = window.electronAPI.onSettingsUpdated((next) => {
       log.debug("Overlay settings updated", next);
+      settingsRef.current = next;
       setSettings(next);
     });
     return () => {
@@ -469,6 +555,21 @@ export function OverlayApp() {
       offSettings();
     };
   }, []);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    if (lastStateRef.current === state) return;
+    logFnFlow("overlay state changed", {
+      from: lastStateRef.current,
+      to: state,
+      recorderState: recorderRef.current?.state ?? null,
+      chunkCount: chunksRef.current.length,
+    });
+    lastStateRef.current = state;
+  }, [state]);
 
   // Stop window drag on global mouseup so releasing outside the grip still cleans up.
   useEffect(() => {
@@ -495,6 +596,10 @@ export function OverlayApp() {
   const startDictation = useCallback(async () => {
     if (startInFlightRef.current || recorderRef.current?.state === "recording") {
       log.debug("Start dictation ignored because recording is already active");
+      logFnFlow("start ignored; recorder already active", {
+        startInFlight: startInFlightRef.current,
+        recorderState: recorderRef.current?.state ?? null,
+      });
       return;
     }
     startInFlightRef.current = true;
@@ -504,22 +609,41 @@ export function OverlayApp() {
       resetTimerRef.current = null;
     }
     try {
-      const usage = await window.electronAPI.getWordCountThisWeek();
-      setWeeklyUsage(usage);
-      if (usage.isLimited && usage.wordsRemaining !== null && usage.wordsRemaining <= 0) {
-        setState("error");
-        setPreview("");
-        setError("You've reached your free weekly word limit.");
-        setUsageLimitBlocked(true);
-        startInFlightRef.current = false;
-        return;
-      }
       log.info("Starting dictation");
+      setState("recording");
       setError("");
       setUsageLimitBlocked(false);
       setPasteAttention(null);
       setPreview("");
       playTone("start");
+      logFnFlow("recording visual activated before async setup", {
+        transcriptionMode: settingsRef.current?.transcriptionMode,
+        cleanupMode: settingsRef.current?.cleanupMode,
+      });
+
+      const usage = await window.electronAPI.getWordCountThisWeek();
+      setWeeklyUsage(usage);
+      logFnFlow("weekly usage checked before recording", {
+        isLimited: usage.isLimited,
+        wordsRemaining: usage.wordsRemaining,
+        isLimitReached: usage.isLimitReached,
+      });
+      if (usage.isLimited && usage.wordsRemaining !== null && usage.wordsRemaining <= 0) {
+        setState("error");
+        setPreview("");
+        setError("You've reached your free weekly word limit.");
+        setUsageLimitBlocked(true);
+        captureDictationEvent("dictation_failed", {
+          transcriptionMode: settingsRef.current?.transcriptionMode,
+          cleanupMode: settingsRef.current?.cleanupMode,
+          cleanupStatus: "not_requested",
+          success: false,
+          failureStage: "usage_limit",
+          errorType: "UsageLimit",
+        });
+        startInFlightRef.current = false;
+        return;
+      }
       const prefMicId = localStorage.getItem(PREF_MIC_KEY) ?? "";
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -557,6 +681,11 @@ export function OverlayApp() {
         mimeType,
         tracks: stream.getTracks().map((track) => ({ kind: track.kind, label: track.label, enabled: track.enabled })),
       });
+      logFnFlow("microphone stream acquired", {
+        mimeType,
+        trackCount: stream.getTracks().length,
+        preferredMicConfigured: Boolean(prefMicId),
+      });
       const recorder = new MediaRecorder(stream, {
         mimeType,
         audioBitsPerSecond: RECORDING_AUDIO_BITS_PER_SECOND,
@@ -570,14 +699,35 @@ export function OverlayApp() {
       };
       recorder.onstop = () => {
         log.info("Recorder stopped");
+        logFnFlow("media recorder onstop fired", {
+          chunkCount: chunksRef.current.length,
+          recordingMs: recordingStartedAtRef.current && recordingStoppedAtRef.current
+            ? Math.round(recordingStoppedAtRef.current - recordingStartedAtRef.current)
+            : null,
+        });
         recorderRef.current = null;
         void finishDictation();
       };
       recorder.start(CLOUD_CHUNK_MS);
-      setState("recording");
+      recordingStartedAtRef.current = performance.now();
+      recordingStoppedAtRef.current = null;
+      logFnFlow("media recorder started", {
+        recorderState: recorder.state,
+        timesliceMs: CLOUD_CHUNK_MS,
+      });
+      captureDictationEvent("dictation_started", {
+        transcriptionMode: settingsRef.current?.transcriptionMode,
+        cleanupMode: settingsRef.current?.cleanupMode,
+        cleanupStatus: settingsRef.current?.cleanupEnabled && settingsRef.current.cleanupMode === "fast" ? "pending_background" : undefined,
+        success: true,
+      });
       startInFlightRef.current = false;
       if (stopRequestedDuringStartRef.current) {
         stopRequestedDuringStartRef.current = false;
+        recordingStoppedAtRef.current = performance.now();
+        logFnFlow("stop requested during async start; stopping recorder immediately", {
+          recorderState: recorder.state,
+        });
         recorder.stop();
       }
     } catch (err) {
@@ -587,18 +737,44 @@ export function OverlayApp() {
       setState("error");
       setError(err instanceof Error ? err.message : "Microphone access failed.");
       log.error("Failed to start dictation", err);
+      logFnFlow("start dictation failed", {
+        errorType: errorType(err),
+        message: err instanceof Error ? err.message : String(err),
+      });
+      captureDictationEvent("dictation_failed", {
+        transcriptionMode: settingsRef.current?.transcriptionMode,
+        cleanupMode: settingsRef.current?.cleanupMode,
+        cleanupStatus: "not_requested",
+        success: false,
+        failureStage: "microphone",
+        errorType: errorType(err),
+      });
     }
   }, [resetToIdle, cleanupVoiceDetector]);
 
   const stopDictation = useCallback(() => {
     log.info("Stopping dictation", { recorderState: recorderRef.current?.state });
+    logFnFlow("stop requested in renderer", {
+      startInFlight: startInFlightRef.current,
+      recorderState: recorderRef.current?.state ?? null,
+      chunkCount: chunksRef.current.length,
+    });
     if (startInFlightRef.current && recorderRef.current?.state !== "recording") {
       stopRequestedDuringStartRef.current = true;
+      logFnFlow("stop deferred until recorder finishes starting");
       return;
     }
     if (recorderRef.current?.state === "recording") {
       playTone("stop");
+      recordingStoppedAtRef.current = performance.now();
+      logFnFlow("media recorder stop called", {
+        recordingMs: recordingStartedAtRef.current
+          ? Math.round(recordingStoppedAtRef.current - recordingStartedAtRef.current)
+          : null,
+      });
       recorderRef.current.stop();
+    } else {
+      logFnFlow("stop ignored; no active recording recorder");
     }
   }, []);
 
@@ -643,18 +819,37 @@ export function OverlayApp() {
 
   const finishDictation = useCallback(async () => {
     log.info("Finishing dictation", { chunkCount: chunksRef.current.length });
+    logFnFlow("finish dictation started", {
+      chunkCount: chunksRef.current.length,
+      recordingMs: recordingStartedAtRef.current && recordingStoppedAtRef.current
+        ? Math.round(recordingStoppedAtRef.current - recordingStartedAtRef.current)
+        : null,
+    });
     cleanupVoiceDetector();
     setState("processing");
     setPreview("");
     streamRef.current?.getTracks().forEach((track) => track.stop());
+    let failureStage = "audio_prep";
+    let failureMetadata: DictationAnalyticsProperties = {};
 
     try {
+      const currentSettings = settingsRef.current;
       const t0 = performance.now();
       const blob = new Blob(chunksRef.current, { type: preferredMimeType() });
       log.debug("Audio blob prepared", { size: blob.size, type: blob.type });
-      // Convert webm/opus → 16-bit mono 16 kHz WAV so whisper-server can read it.
-      const arrayBuffer = await blobToWav(blob);
-      log.debug("WAV conversion complete", { wavByteLength: arrayBuffer.byteLength });
+
+      const isCloudMode = currentSettings?.transcriptionMode === "cloud";
+      let arrayBuffer: ArrayBuffer;
+      if (isCloudMode) {
+        // Cloud transcription accepts webm/opus natively — skip the expensive WAV conversion.
+        arrayBuffer = await blob.arrayBuffer();
+        log.debug("Skipped WAV conversion (cloud mode)", { byteLength: arrayBuffer.byteLength });
+      } else {
+        // Local Whisper needs 16-bit mono 16 kHz WAV.
+        arrayBuffer = await blobToWav(blob);
+        log.debug("WAV conversion complete", { wavByteLength: arrayBuffer.byteLength });
+      }
+
       const chunks = await Promise.all(
         chunksRef.current.map(async (chunk): Promise<AudioChunk> => ({
           buffer: await chunk.arrayBuffer(),
@@ -667,16 +862,36 @@ export function OverlayApp() {
         blobPrepMs: Math.round(t1 - t0),
         byteLength: arrayBuffer.byteLength,
         chunkCount: chunks.length,
+        isCloudMode,
+      });
+      logFnFlow("audio prepared for transcription", {
+        audioPrepMs: Math.round(t1 - t0),
+        byteLength: arrayBuffer.byteLength,
+        chunkCount: chunks.length,
+        isCloudMode,
       });
 
-      const result = await window.electronAPI.transcribeLocalWhisper(arrayBuffer, settings ?? undefined, chunks);
-      window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
+      const fastPasteEnabled = currentSettings?.cleanupMode === "fast" && currentSettings.cleanupEnabled;
+      const transcriptionOptions = fastPasteEnabled
+        ? { ...currentSettings, cleanupEnabled: false, saveToHistory: false }
+        : currentSettings ?? undefined;
+      failureStage = "transcription";
+      const result = await window.electronAPI.transcribeLocalWhisper(arrayBuffer, transcriptionOptions, chunks);
+      if (!fastPasteEnabled) {
+        window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
+      }
 
       const t2 = performance.now();
       log.info("Transcription IPC round-trip complete", {
         transcribeMs: Math.round(t2 - t1),
-        text: result.text,
+        textLength: result.text.length,
         recordId: result.record?.id,
+      });
+      logFnFlow("transcription returned to overlay", {
+        transcribeMs: Math.round(t2 - t1),
+        textLength: result.text.length,
+        hasLangMismatch: Boolean(result.langMismatch),
+        cleanupStatus: fastPasteEnabled ? "pending_background" : result.timing?.cleanupStatus,
       });
 
       setPreview(result.text);
@@ -688,33 +903,232 @@ export function OverlayApp() {
         return;
       }
 
-      let textToPaste = result.text;
+      const textToPaste = result.text;
 
       await window.electronAPI.setOverlayInteractive(false);
+      failureStage = "paste";
+      logFnFlow("paste requested from overlay", {
+        textLength: textToPaste.length,
+        fastPasteEnabled,
+      });
+      const pasteStartedAt = performance.now();
       const pasteResult = await window.electronAPI.pasteText(textToPaste);
+      logFnFlow("paste result returned to overlay", {
+        ok: pasteResult.ok,
+        attentionKind: pasteResult.attention?.kind ?? null,
+        pasteMs: Math.round(performance.now() - pasteStartedAt),
+        textLength: textToPaste.length,
+      });
       if (!pasteResult.ok) {
         if (pasteResult.attention) {
           setPasteAttention(pasteResult.attention);
           setPreview(result.text);
           setError("Couldn't paste — text is on your clipboard");
           setState("error");
+          captureDictationEvent("dictation_failed", {
+            transcriptionMode: result.timing?.transcriptionMode ?? currentSettings?.transcriptionMode,
+            cleanupMode: result.timing?.cleanupMode ?? currentSettings?.cleanupMode,
+            cleanupStatus: fastPasteEnabled ? "pending_background" : result.timing?.cleanupStatus,
+            audioDurationMs: recordingStoppedAtRef.current && recordingStartedAtRef.current
+              ? Math.max(0, Math.round(recordingStoppedAtRef.current - recordingStartedAtRef.current))
+              : undefined,
+            audioPrepMs: Math.round(t1 - t0),
+            transcriptionMs: result.timing?.transcriptionMs,
+            pasteMs: Math.round(performance.now() - t2),
+            wordCount: countWords(textToPaste),
+            success: false,
+            failureStage: "paste",
+            errorType: "PasteAttention",
+          });
           return;
         }
         throw new Error(pasteResult.message ?? "Text copied, but paste did not complete.");
       }
 
       const t3 = performance.now();
-      log.info("Paste complete", {
+      const recordingStartedAt = recordingStartedAtRef.current;
+      const recordingStoppedAt = recordingStoppedAtRef.current ?? t0;
+      const recordingMs = recordingStartedAt === null ? 0 : Math.max(0, Math.round(recordingStoppedAt - recordingStartedAt));
+      const cleanupStatus: CleanupStatus = fastPasteEnabled ? "pending_background" : result.timing?.cleanupStatus ?? "not_requested";
+      // Build a fully-typed timing object for compile-time verification of all required fields.
+      const dictationTiming: FullDictationTiming = {
+        recordingMs,
+        audioDurationMs: recordingMs,
+        audioPrepMs: Math.round(t1 - t0),
+        transcriptionMs: result.timing?.transcriptionMs ?? 0,
+        cleanupMs: result.timing?.cleanupMs ?? 0,
+        dbSaveMs: result.timing?.dbSaveMs ?? 0,
+        transcriptionMode: result.timing?.transcriptionMode ?? currentSettings?.transcriptionMode ?? "local",
+        cleanupMode: result.timing?.cleanupMode ?? currentSettings?.cleanupMode ?? "accurate",
+        cleanupEnabled: fastPasteEnabled ? true : result.timing?.cleanupEnabled ?? Boolean(currentSettings?.cleanupEnabled),
+        cleanupSkipped: fastPasteEnabled ? false : result.timing?.cleanupSkipped ?? false,
+        cleanupStatus,
         pasteMs: Math.round(t3 - t2),
-        totalMs: Math.round(t3 - t0),
-        pasteResult,
+        totalAfterStopMs: Math.round(t3 - t0),
+        audioBytes: arrayBuffer.byteLength,
+        timeToRawPasteMs: Math.round(t3 - t0),
+        cleanupCompletedAfterPasteMs: null,
+        totalFinalizationMs: fastPasteEnabled ? null : Math.round(t3 - t0),
+      };
+      log.info("Dictation timing", {
+        ...dictationTiming,
+        transcribeIpcMs: Math.round(t2 - t1),
       });
+      failureMetadata = {
+        transcriptionMode: dictationTiming.transcriptionMode,
+        cleanupMode: dictationTiming.cleanupMode,
+        cleanupStatus: dictationTiming.cleanupStatus,
+        audioDurationMs: dictationTiming.audioDurationMs,
+        audioPrepMs: dictationTiming.audioPrepMs,
+        transcriptionMs: dictationTiming.transcriptionMs,
+        cleanupMs: dictationTiming.cleanupMs,
+        pasteMs: dictationTiming.pasteMs,
+        timeToRawPasteMs: dictationTiming.timeToRawPasteMs,
+        wordCount: countWords(textToPaste),
+      };
+
+      if (fastPasteEnabled) {
+        captureDictationEvent("dictation_raw_pasted", {
+          ...failureMetadata,
+          success: true,
+        });
+      } else {
+        captureDictationEvent("dictation_cleanup_completed", {
+          ...failureMetadata,
+          cleanupCompletedAfterPasteMs: dictationTiming.cleanupCompletedAfterPasteMs,
+          totalFinalizationMs: dictationTiming.totalFinalizationMs,
+          success: dictationTiming.cleanupStatus !== "failed",
+        });
+      }
 
       setState("complete");
+      logFnFlow("overlay marked dictation complete", {
+        pasteMs: dictationTiming.pasteMs,
+        timeToRawPasteMs: dictationTiming.timeToRawPasteMs,
+        fastPasteEnabled,
+      });
+      if (fastPasteEnabled) {
+        void (async () => {
+          try {
+            const cleanup = await window.electronAPI.cleanupTranscriptionLater(result.originalText || textToPaste, currentSettings ?? undefined);
+            window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
+            const cleanupDoneAt = performance.now();
+            let replacement: "skipped" | "replaced" | "failed" = "skipped";
+            if (
+              !result.langMismatch
+              && normalizeComparableText(cleanup.text) !== normalizeComparableText(textToPaste)
+            ) {
+              const replaceResult = await window.electronAPI.replaceLastPastedText(textToPaste, cleanup.text);
+              replacement = replaceResult.ok ? "replaced" : "failed";
+              if (replaceResult.ok) {
+                setPreview(cleanup.text);
+              }
+            }
+            const finalDoneAt = performance.now();
+            const finalCleanupStatus = finalizedCleanupStatus(cleanup.timing.cleanupStatus, replacement);
+            const cleanupCompletedAfterPasteMs = Math.round(cleanupDoneAt - t3);
+            const totalFinalizationMs = Math.round(finalDoneAt - t0);
+            const finalTiming: FullDictationTiming = {
+              ...dictationTiming,
+              cleanupMs: cleanup.timing.cleanupMs,
+              dbSaveMs: cleanup.timing.dbSaveMs,
+              cleanupMode: cleanup.timing.cleanupMode,
+              cleanupEnabled: cleanup.timing.cleanupEnabled,
+              cleanupSkipped: cleanup.timing.cleanupSkipped,
+              cleanupStatus: finalCleanupStatus,
+              cleanupCompletedAfterPasteMs,
+              totalFinalizationMs,
+            };
+
+            log.info("Dictation finalization timing", {
+              ...finalTiming,
+              replacement,
+              recordId: cleanup.record?.id,
+              processedLength: cleanup.text.length,
+            });
+            captureDictationEvent("dictation_cleanup_completed", {
+              transcriptionMode: finalTiming.transcriptionMode,
+              cleanupMode: finalTiming.cleanupMode,
+              cleanupStatus: finalTiming.cleanupStatus,
+              audioDurationMs: finalTiming.audioDurationMs,
+              audioPrepMs: finalTiming.audioPrepMs,
+              transcriptionMs: finalTiming.transcriptionMs,
+              cleanupMs: finalTiming.cleanupMs,
+              pasteMs: finalTiming.pasteMs,
+              timeToRawPasteMs: finalTiming.timeToRawPasteMs,
+              cleanupCompletedAfterPasteMs: finalTiming.cleanupCompletedAfterPasteMs,
+              totalFinalizationMs: finalTiming.totalFinalizationMs,
+              wordCount: countWords(cleanup.text),
+              replacement,
+              success: finalTiming.cleanupStatus !== "failed",
+            });
+            if (finalTiming.cleanupStatus === "failed") {
+              captureDictationEvent("dictation_failed", {
+                transcriptionMode: finalTiming.transcriptionMode,
+                cleanupMode: finalTiming.cleanupMode,
+                cleanupStatus: finalTiming.cleanupStatus,
+                audioDurationMs: finalTiming.audioDurationMs,
+                audioPrepMs: finalTiming.audioPrepMs,
+                transcriptionMs: finalTiming.transcriptionMs,
+                cleanupMs: finalTiming.cleanupMs,
+                pasteMs: finalTiming.pasteMs,
+                timeToRawPasteMs: finalTiming.timeToRawPasteMs,
+                cleanupCompletedAfterPasteMs: finalTiming.cleanupCompletedAfterPasteMs,
+                totalFinalizationMs: finalTiming.totalFinalizationMs,
+                wordCount: countWords(cleanup.text),
+                success: false,
+                failureStage: replacement === "failed" ? "replace" : "cleanup",
+                errorType: replacement === "failed" ? "PasteReplaceFailed" : "CleanupFailed",
+              });
+            }
+          } catch (err) {
+            log.warn("Background cleanup after raw paste failed", err);
+            const failedAt = performance.now();
+            const failedTiming: FullDictationTiming = {
+              ...dictationTiming,
+              cleanupStatus: "failed",
+              cleanupCompletedAfterPasteMs: Math.round(failedAt - t3),
+              totalFinalizationMs: Math.round(failedAt - t0),
+            };
+            log.info("Dictation finalization timing", {
+              ...failedTiming,
+              replacement: "failed",
+            });
+            captureDictationEvent("dictation_cleanup_completed", {
+              transcriptionMode: failedTiming.transcriptionMode,
+              cleanupMode: failedTiming.cleanupMode,
+              cleanupStatus: failedTiming.cleanupStatus,
+              audioDurationMs: failedTiming.audioDurationMs,
+              audioPrepMs: failedTiming.audioPrepMs,
+              transcriptionMs: failedTiming.transcriptionMs,
+              cleanupMs: failedTiming.cleanupMs,
+              pasteMs: failedTiming.pasteMs,
+              timeToRawPasteMs: failedTiming.timeToRawPasteMs,
+              cleanupCompletedAfterPasteMs: failedTiming.cleanupCompletedAfterPasteMs,
+              totalFinalizationMs: failedTiming.totalFinalizationMs,
+              wordCount: failureMetadata.wordCount,
+              replacement: "failed",
+              success: false,
+            });
+            captureDictationEvent("dictation_failed", {
+              ...failureMetadata,
+              cleanupStatus: "failed",
+              cleanupCompletedAfterPasteMs: failedTiming.cleanupCompletedAfterPasteMs,
+              totalFinalizationMs: failedTiming.totalFinalizationMs,
+              success: false,
+              failureStage: "cleanup",
+              errorType: errorType(err),
+            });
+          }
+        })();
+      }
       // If mismatch exists, keep prompt open until user acts (translate or keep).
       if (result.langMismatch) {
         setLangMismatch(result.langMismatch);
       } else {
+        logFnFlow("scheduling overlay reset after paste", {
+          resetMs: COMPLETE_RESET_MS,
+        });
         resetTimerRef.current = window.setTimeout(() => {
           log.debug("Resetting overlay after completion");
           resetToIdle();
@@ -730,6 +1144,12 @@ export function OverlayApp() {
       setError(message);
       setUsageLimitBlocked(message.toLowerCase().includes("word limit"));
       log.error("Failed to finish dictation", err);
+      captureDictationEvent("dictation_failed", {
+        ...failureMetadata,
+        success: false,
+        failureStage,
+        errorType: errorType(err),
+      });
     }
   }, [settings, resetToIdle, cleanupVoiceDetector]);
 
@@ -744,13 +1164,7 @@ export function OverlayApp() {
   })();
 
   /** Pill dimensions driven by state + hover. */
-  const pillSize = (() => {
-    if (state === "recording") return { width: 220, height: 40 };
-    if (state === "processing") return { width: 180, height: 40 };
-    if (state === "complete") return { width: 130, height: 32 };
-    if (isHovered && state === "idle") return { width: 144, height: 32 };
-    return { width: 110, height: 8 }; // resting thin line
-  })();
+  const pillSize = PILL_SIZES[micState];
 
   /** Whether the pill is large enough to show inner content. */
   const isPillExpanded =
@@ -798,7 +1212,16 @@ export function OverlayApp() {
               <>
                 <p className="pill-error-panel__hint">You've used your free words for this week. Upgrade for unlimited dictation.</p>
                 <div className="pill-error-panel__actions">
-                  <TextButton variant="primary" onClick={() => window.electronAPI.openPanelTab("account")}>Upgrade plan</TextButton>
+                  <TextButton
+                    variant="primary"
+                    onClick={() => {
+                      // Privacy: upgrade analytics uses safe CTA metadata only, never dictated content or app context.
+                      capture("upgrade_clicked", { source: "overlay_usage_limit" });
+                      window.electronAPI.openPanelTab("account");
+                    }}
+                  >
+                    Upgrade plan
+                  </TextButton>
                 </div>
               </>
             )}
@@ -877,6 +1300,7 @@ export function OverlayApp() {
       <div
         className="pill-bar-wrapper"
         onMouseEnter={() => {
+          cancelMenuClose();
           setIsHovered(true);
           void window.electronAPI.setOverlayInteractive(true);
         }}
@@ -884,17 +1308,20 @@ export function OverlayApp() {
           // Don't close if moving to the menu (pill-menu-anchor is a DOM child of this wrapper
           // but visually outside its layout box — so check relatedTarget just in case).
           const rel = e.relatedTarget as Element | null;
-          if (rel?.closest(".pill-menu-anchor")) return;
+          if (rel?.closest(".pill-menu-anchor")) {
+            cancelMenuClose();
+            return;
+          }
           setIsHovered(false);
-          // Give user 350ms to reach the context menu before closing it
-          setTimeout(() => setMenuOpen(false), 350);
+          if (menuOpen) scheduleMenuClose();
         }}
       >
         {/* Context menu — appears above the pill when gear is clicked */}
         <AnimatePresence>
           {menuOpen && (
             <PillContextMenu
-              onClose={() => setMenuOpen(false)}
+              onClose={closeMenu}
+              onKeepOpen={cancelMenuClose}
               onPasteLastTranscript={() => void pasteLastTranscript()}
             />
           )}
@@ -913,6 +1340,7 @@ export function OverlayApp() {
               transition={{ duration: 0.12 }}
               onClick={(e) => {
                 e.stopPropagation();
+                cancelMenuClose();
                 setMenuOpen((prev) => !prev);
               }}
             >

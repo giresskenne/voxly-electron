@@ -282,10 +282,12 @@ export class OpenAiCleanupService {
 
     const fidelity = enforceDictationFidelity(originalText, processedText);
     if (fidelity.reason) {
+      const logTranscripts = process.env.DICTAFUN_LOG_TRANSCRIPTS === "1";
       log.warn("Cleanup output failed fidelity check; returning raw transcription", {
         reason: fidelity.reason,
-        originalText,
-        processedText,
+        originalLength: originalText.length,
+        processedLength: processedText.length,
+        ...(logTranscripts ? { originalText, processedText } : {}),
       });
       return { text: fidelity.text, method: "none" };
     }

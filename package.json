@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.0.5-feature-onboarding-free-weekly-limit.1",
+  "version": "1.1.0-feat-rearchitecture-the-app-flow-for-speed.2",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
@@ -48,6 +48,14 @@
   "build": {
     "appId": "com.dictafun.desktop",
     "productName": "Dicta Fun",
+    "protocols": [
+      {
+        "name": "Dicta Fun",
+        "schemes": [
+          "dictafun"
+        ]
+      }
+    ],
     "files": [
       "out/**/*",
       "resources/**/*",

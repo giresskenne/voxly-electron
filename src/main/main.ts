@@ -10,6 +10,7 @@ import { globeKeyManager } from "./services/globe-key-manager";
 import { entitlementService } from "./services/entitlements";
 import { windows } from "./window-manager";
 import { createMainLogger, ensureFileLogging } from "./debug-log";
+import { warmupAi } from "./services/backend-api";
 
 // Development reads the ignored project .env. Packaged CI builds include
 // resources/runtime.env with non-secret runtime config such as VITE_API_URL.
@@ -42,6 +43,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 }
+log.info("Single-instance lock", { acquired: hasSingleInstanceLock });
 
 app.on("second-instance", (_event, argv) => {
   const deepLink = getDeepLinkFromArgv(argv);
@@ -142,6 +144,8 @@ app.whenReady().then(async () => {
   registerInitialHotkey();
   log.debug("Broadcasting initial runtime status", getRuntimeStatus());
   windows.sendRuntimeStatus(getRuntimeStatus());
+  // Fire-and-forget AI warmup so the first cloud dictation is faster.
+  void warmupAi();
 
   app.on("activate", () => {
     log.info("App activated");

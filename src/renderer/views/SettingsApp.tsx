@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowLeft,
   ArrowRight,
@@ -8,16 +8,19 @@ import {
   CheckCircle2,
   ChevronRight,
   Circle,
+  ClipboardPaste,
   Copy,
   CreditCard,
   Download,
   Gift,
   Globe,
+  Hand,
   Home,
   HelpCircle,
   LockKeyhole,
   LogIn,
   LogOut,
+  Keyboard,
   MessageSquare,
   Mic,
   MousePointerClick,
@@ -32,6 +35,7 @@ import {
   Trash2,
   UserCircle,
   X,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -54,14 +58,22 @@ import { modelOptions } from "../design/source";
 import { cn } from "../lib/cn";
 import { createRendererLogger } from "../lib/debug-log";
 import { I18nProvider, displayLanguageOptions, htmlLang, translate, useT } from "../lib/i18n";
+import { capture, identifyUserEmail, resetAnalyticsIdentity } from "../services/analytics";
 
 const log = createRendererLogger("settings-ui");
 const ENTITLEMENT_REFRESH_MS = 60_000;
 const SHORTCUT_TEST_AUDIO_BITS_PER_SECOND = 128_000;
 const canSkipOnboarding = import.meta.env.DEV;
 
+function captureUpgradeClicked(properties: Record<string, unknown>): void {
+  // Privacy: never send user text, emails, URLs, tokens, or secrets to analytics.
+  // Upgrade analytics may include only safe CTA, plan, interval, and app metadata.
+  capture("upgrade_clicked", properties);
+}
+
 const DEFAULT_ENTITLEMENT: EntitlementStatus = {
   isAuthenticated: false,
+  accountEmail: null,
   billingPlan: "free",
   billingStatus: "unknown",
   canUseCloudTranscription: false,
@@ -526,6 +538,45 @@ function hotkeyModeOptions(t: ReturnType<typeof useT>): Array<{
   ];
 }
 
+function pasteModeOptions(language: AppSettings["displayLanguage"] = "en"): Array<{
+  value: AppSettings["cleanupMode"];
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}> {
+  if (language === "fr-FR") {
+    return [
+      {
+        value: "fast",
+        label: "Rapide",
+        description: "Colle tout de suite, puis met le texte à jour quand la correction est terminée.",
+        icon: Copy,
+      },
+      {
+        value: "accurate",
+        label: "Propre",
+        description: "Attend la correction, puis colle une seule version soignée.",
+        icon: Sparkles,
+      },
+    ];
+  }
+
+  return [
+    {
+      value: "fast",
+      label: "Fast",
+      description: "Paste immediately, then update the text after cleanup finishes.",
+      icon: Copy,
+    },
+    {
+      value: "accurate",
+      label: "Clean",
+      description: "Wait for cleanup first, then paste the polished text once.",
+      icon: Sparkles,
+    },
+  ];
+}
+
 export function SettingsApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
@@ -609,6 +660,12 @@ export function SettingsApp() {
     document.documentElement.lang = htmlLang(settings?.displayLanguage ?? "en");
   }, [settings?.displayLanguage]);
 
+  useEffect(() => {
+    if (entitlement.isAuthenticated && entitlement.accountEmail) {
+      identifyUserEmail(entitlement.accountEmail);
+    }
+  }, [entitlement.accountEmail, entitlement.isAuthenticated]);
+
   async function syncEntitlement(force = false) {
     const synced = await window.electronAPI.syncEntitlement(force);
     setEntitlement(synced.entitlements);
@@ -680,10 +737,13 @@ export function SettingsApp() {
 
   async function clearSession() {
     await window.electronAPI.clearSessionToken();
+    resetAnalyticsIdentity();
     await syncEntitlement(true);
   }
 
   async function startCheckout(plan: PaidPlan, interval: BillingInterval) {
+    // Privacy: checkout analytics includes only safe plan/interval metadata, never checkout URLs or user identity.
+    capture("checkout_started", { plan, interval });
     const session = await window.electronAPI.startCheckout({ plan, interval });
     await syncEntitlement(true);
     return session;
@@ -796,6 +856,10 @@ export function SettingsApp() {
               variant="glass"
               className="voxly-upgrade-card__button"
               onClick={() => {
+                captureUpgradeClicked({
+                  source: "sidebar_upgrade_card",
+                  currentPlan: entitlement.billingPlan,
+                });
                 setSettingsDefaultTab("account");
                 setActiveSection("settings");
               }}
@@ -861,7 +925,7 @@ export function SettingsApp() {
               {entitlement.isAuthenticated ? (
                 <button
                   type="button"
-                  className="voxly-profile__menu-item"
+                  className="voxly-profile__menu-item voxly-profile__menu-item--signout"
                   onClick={() => { void clearSession(); setProfileMenuOpen(false); }}
                 >
                   <LogOut size={14} />
@@ -870,7 +934,7 @@ export function SettingsApp() {
               ) : (
                 <button
                   type="button"
-                  className="voxly-profile__menu-item"
+                  className="voxly-profile__menu-item voxly-profile__menu-item--signin"
                   onClick={() => { void window.electronAPI.openWebRoute("signin"); setProfileMenuOpen(false); }}
                 >
                   <LogIn size={14} />
@@ -1032,7 +1096,13 @@ function UsageLimitBanner({ usage }: { usage: WeeklyUsageStatus }) {
         <strong>{title}</strong>
         <p>{detail}</p>
       </div>
-      <TextButton variant="primary" onClick={() => window.electronAPI.openWebRoute("pricing")}>
+      <TextButton
+        variant="primary"
+        onClick={() => {
+          captureUpgradeClicked({ source: "usage_limit_banner" });
+          window.electronAPI.openWebRoute("pricing");
+        }}
+      >
         <Star size={15} />
         {t("overlay.upgrade")}
       </TextButton>
@@ -1042,7 +1112,26 @@ function UsageLimitBanner({ usage }: { usage: WeeklyUsageStatus }) {
 
 // ── Hotkey display chip ───────────────────────────────────────────────────────
 
-function HotkeyChip({ hotkey }: { hotkey: string }) {
+function normalizeShortcutPart(part: string, platform?: RuntimeStatus["platform"]): string {
+  switch (part.trim().toLowerCase()) {
+    case "control":
+      return "Ctrl";
+    case "commandorcontrol":
+      return platform === "darwin" ? "Cmd" : "Ctrl";
+    case "meta":
+      return platform === "win32" ? "Win" : "Cmd";
+    case "super":
+      return platform === "win32" ? "Win" : "Super";
+    case "option":
+      return "Opt";
+    case "return":
+      return "Enter";
+    default:
+      return part.trim();
+  }
+}
+
+function HotkeyChip({ hotkey, platform }: { hotkey: string; platform?: RuntimeStatus["platform"] }) {
   const t = useT();
   if (hotkey === "GLOBE" || hotkey === "Fn") {
     return (
@@ -1059,6 +1148,22 @@ function HotkeyChip({ hotkey }: { hotkey: string }) {
       </div>
     );
   }
+
+  if (platform) {
+    const parts = hotkey.split("+").map((part) => normalizeShortcutPart(part, platform)).filter(Boolean);
+    return (
+      <div className="home-banner__shortcut-keys">
+        <span className="home-banner__shortcut-press">{t("shortcut.press")}</span>
+        {parts.map((part, index) => (
+          <span key={`${part}-${index}`} className="home-banner__shortcut-part">
+            <span className="home-banner__key">{part}</span>
+            {index < parts.length - 1 && <span className="home-banner__shortcut-plus">+</span>}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="home-banner__shortcut-keys">
       <span className="home-banner__shortcut-press">{t("shortcut.press")}</span>
@@ -1435,6 +1540,12 @@ function SettingsPage({
   }
 
   async function handleStartCheckout(plan: PaidPlan) {
+    captureUpgradeClicked({
+      source: "pricing_card",
+      plan,
+      interval: billingInterval,
+      currentPlan: entitlement.billingPlan,
+    });
     setCheckoutBusy(plan);
     setAccountMessage("");
     try {
@@ -1449,11 +1560,47 @@ function SettingsPage({
 
   return (
     <div className="voxly-page">
-      {/* Apple HIG toolbar tab bar */}
-      <div className="sp-toolbar" role="tablist" aria-label="Settings sections">
-        <SettingsTabBtn id="general" label="General" icon={Settings} active={activeTab === "general"} onClick={() => setActiveTab("general")} />
-        <SettingsTabBtn id="account" label="Account" icon={CreditCard} active={activeTab === "account"} onClick={() => setActiveTab("account")} />
-        <SettingsTabBtn id="privacy" label="Privacy" icon={Shield} active={activeTab === "privacy"} onClick={() => setActiveTab("privacy")} />
+      {/* Apple HIG toolbar row with account status on account tab */}
+      <div className="sp-toolbar-row">
+        <div className="sp-toolbar" role="tablist" aria-label="Settings sections">
+          <SettingsTabBtn id="general" label="General" icon={Settings} active={activeTab === "general"} onClick={() => setActiveTab("general")} />
+          <SettingsTabBtn id="account" label="Account" icon={CreditCard} active={activeTab === "account"} onClick={() => setActiveTab("account")} />
+          <SettingsTabBtn id="privacy" label="Privacy" icon={Shield} active={activeTab === "privacy"} onClick={() => setActiveTab("privacy")} />
+        </div>
+
+        {activeTab === "account" && (
+          <div className="account-status account-status--inline">
+            <div className="account-status__avatar">
+              <UserCircle size={24} />
+            </div>
+            <div className="account-status__info">
+              <span className="account-status__name">
+                {settings.agentName || "Your account"}
+              </span>
+              <span className="account-status__plan">
+                {formatPlanLabel(entitlement.billingPlan, t)}
+                {entitlement.billingStatus !== "unknown" && ` · ${entitlement.billingStatus.replace(/_/g, " ")}`}
+              </span>
+            </div>
+            <div className="account-status__actions">
+              <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
+                <RefreshCw size={15} />
+                Refresh
+              </TextButton>
+              {entitlement.isAuthenticated ? (
+                <TextButton variant="quiet" disabled={accountBusy} onClick={() => void handleSignOut()}>
+                  <LogOut size={15} />
+                  Sign Out
+                </TextButton>
+              ) : (
+                <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("signin")}>
+                  <LogIn size={15} />
+                  Sign In
+                </TextButton>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* General ── name, hotkey, mode, cleanup, updates */}
@@ -1527,6 +1674,41 @@ function SettingsPage({
             </label>
           </div>
 
+          <div className="settings-row settings-row--stacked">
+            <div>
+              <h3>Paste mode</h3>
+              <p>Choose whether Dicta Fun pastes instantly or waits for cleaned text first.</p>
+            </div>
+            <div className="settings-mode-options" role="radiogroup" aria-label="Paste mode">
+              {pasteModeOptions().map((option) => {
+                const Icon = option.icon;
+                const disabled = !settings.cleanupEnabled || !entitlement.canUseCleanup;
+                return (
+                  <label
+                    key={option.value}
+                    className={cn(
+                      "settings-mode-option",
+                      settings.cleanupMode === option.value && "settings-mode-option--active",
+                      disabled && "settings-mode-option--disabled",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="paste-mode"
+                      value={option.value}
+                      checked={settings.cleanupMode === option.value}
+                      disabled={disabled}
+                      onChange={() => void onPatchSettings({ cleanupMode: option.value })}
+                    />
+                    <Icon size={17} />
+                    <span>{option.label}</span>
+                    <small>{option.description}</small>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="settings-row">
             <div>
               <h3>App version</h3>
@@ -1546,6 +1728,19 @@ function SettingsPage({
               )}
             </div>
           </div>
+
+          {canSkipOnboarding && (
+            <div className="settings-row">
+              <div>
+                <h3>Developer onboarding</h3>
+                <p>Reset setup completion and show the onboarding flow again.</p>
+              </div>
+              <TextButton variant="quiet" onClick={() => void onPatchSettings({ onboardingComplete: false })}>
+                <RefreshCw size={16} />
+                Rerun Onboarding
+              </TextButton>
+            </div>
+          )}
 
           <div className="settings-row">
             <div>
@@ -1568,39 +1763,6 @@ function SettingsPage({
       {/* Account ── plan status + pricing cards */}
       {activeTab === "account" && (
         <div id="sp-panel-account" role="tabpanel" aria-labelledby="sp-tab-account">
-          {/* Current plan status bar */}
-          <div className="account-status">
-            <div className="account-status__avatar">
-              <UserCircle size={24} />
-            </div>
-            <div className="account-status__info">
-              <span className="account-status__name">
-                {settings.agentName || "Your account"}
-              </span>
-              <span className="account-status__plan">
-                {formatPlanLabel(entitlement.billingPlan, t)}
-                {entitlement.billingStatus !== "unknown" && ` · ${entitlement.billingStatus.replace(/_/g, " ")}`}
-              </span>
-            </div>
-            <div className="account-status__actions">
-              <TextButton disabled={accountBusy} onClick={() => void handleRefreshEntitlement()}>
-                <RefreshCw size={15} />
-                Refresh
-              </TextButton>
-              {entitlement.isAuthenticated ? (
-                <TextButton variant="quiet" disabled={accountBusy} onClick={() => void handleSignOut()}>
-                  <LogOut size={15} />
-                  Sign Out
-                </TextButton>
-              ) : (
-                <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("signin")}>
-                  <LogIn size={15} />
-                  Sign In
-                </TextButton>
-              )}
-            </div>
-          </div>
-
           {/* Billing interval toggle */}
           <div className="pricing-billing-toggle">
             <span className={cn("pricing-billing-toggle__label", billingInterval === "monthly" && "pricing-billing-toggle__label--active")}>
@@ -1638,7 +1800,14 @@ function SettingsPage({
               <div className="pricing-card__cta">
                 <TextButton
                   disabled={entitlement.billingPlan === "free"}
-                  onClick={() => window.electronAPI.openWebRoute("pricing")}
+                  onClick={() => {
+                    captureUpgradeClicked({
+                      source: "pricing_card",
+                      plan: "free",
+                      currentPlan: entitlement.billingPlan,
+                    });
+                    window.electronAPI.openWebRoute("pricing");
+                  }}
                 >
                   {entitlement.billingPlan === "free" ? "Current plan" : "Download"}
                 </TextButton>
@@ -1822,48 +1991,123 @@ function SettingsPage({
   );
 }
 
-const onboardingSteps: Array<{
-  id: string;
+type OnboardingStepId = "language" | "welcome" | "plan" | "permissions" | "hotkey" | "paste-mode" | "finish";
+
+type OnboardingStep = {
+  id: OnboardingStepId;
   title: string;
   eyebrow: string;
   summary: string;
   icon?: LucideIcon;
-}> = [
-  {
-    id: "welcome",
-    eyebrow: "Setup",
-    title: "Make dictation feel native.",
-    summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
-    icon: MousePointerClick,
-  },
-  {
-    id: "plan",
-    eyebrow: "Free Plan",
-    title: "Start with 2,000 free words each week.",
-    summary: "Free dictation is capped weekly. Dicta Fun will warn you as you approach the limit and point you to upgrade when you need more.",
-    icon: Star,
-  },
-  {
-    id: "permissions",
-    eyebrow: "Access",
-    title: "Grant only what dictation needs.",
-    summary: "Microphone access captures speech. On macOS, Accessibility lets Dicta Fun paste the result back at the cursor.",
-    icon: LockKeyhole,
-  },
-  {
-    id: "hotkey",
-    eyebrow: "Shortcut",
-    title: "Learn your shortcut.",
-    summary: "First hold the shortcut while speaking, then try pressing once to start and once to stop. Each test transcribes here.",
-  },
-  {
-    id: "finish",
-    eyebrow: "Ready",
-    title: "Ready from anywhere.",
-    summary: "Use the shortcut you tested and Dicta Fun will paste the transcript where your cursor is focused.",
-    icon: Check,
-  },
-];
+};
+
+function onboardingStepsFor(language: AppSettings["displayLanguage"]): OnboardingStep[] {
+  if (language === "fr-FR") {
+    return [
+      {
+        id: "language",
+        eyebrow: "Langue",
+        title: "Choisissez votre langue.",
+        summary: "Dicta Fun utilisera cette langue pour l'interface, les exemples et les tests de dictée.",
+        icon: Globe,
+      },
+      {
+        id: "welcome",
+        eyebrow: "Configuration",
+        title: "Une dictée qui reste naturelle.",
+        summary: "Dicta Fun reste discret jusqu'à ce que vous utilisiez votre raccourci, puis colle le texte dans l'application ouverte.",
+        icon: MousePointerClick,
+      },
+      {
+        id: "plan",
+        eyebrow: "Offre gratuite",
+        title: "Commencez avec 2 000 mots gratuits chaque semaine.",
+        summary: "La dictée gratuite est limitée chaque semaine. Dicta Fun vous préviendra quand vous approcherez de la limite.",
+        icon: Star,
+      },
+      {
+        id: "permissions",
+        eyebrow: "Accès",
+        title: "Autorisez seulement ce dont la dictée a besoin.",
+        summary: "Le microphone capture votre voix. Sur macOS, Accessibilité permet de coller le résultat à l'emplacement du curseur.",
+        icon: LockKeyhole,
+      },
+      {
+        id: "hotkey",
+        eyebrow: "Raccourci",
+        title: "Apprenez votre raccourci.",
+        summary: "Testez d'abord le maintien du raccourci pendant que vous parlez, puis l'appui une fois pour démarrer et une fois pour arrêter.",
+        icon: Keyboard,
+      },
+      {
+        id: "paste-mode",
+        eyebrow: "Mode de collage",
+        title: "Testez les deux modes de collage.",
+        summary: "Rapide colle tout de suite. Propre attend le texte corrigé.",
+        icon: Sparkles,
+      },
+      {
+        id: "finish",
+        eyebrow: "Prêt",
+        title: "Prêt dans toutes vos applications.",
+        summary: "Placez votre curseur où vous voulez écrire, puis utilisez le raccourci que vous venez de tester.",
+        icon: Check,
+      },
+    ];
+  }
+
+  return [
+    {
+      id: "language",
+      eyebrow: "Language",
+      title: "Choose your language.",
+      summary: "Dicta Fun will use this language for the interface, examples, and dictation tests.",
+      icon: Globe,
+    },
+    {
+      id: "welcome",
+      eyebrow: "Setup",
+      title: "Make dictation feel native.",
+      summary: "Dicta Fun stays out of the way until you press your shortcut, then pastes the transcript back into the app you were using.",
+      icon: MousePointerClick,
+    },
+    {
+      id: "plan",
+      eyebrow: "Free Plan",
+      title: "Start with 2,000 free words each week.",
+      summary: "Free dictation is capped weekly. Dicta Fun will warn you as you approach the limit and point you to upgrade when you need more.",
+      icon: Star,
+    },
+    {
+      id: "permissions",
+      eyebrow: "Access",
+      title: "Grant only what dictation needs.",
+      summary: "Microphone access captures speech. On macOS, Accessibility lets Dicta Fun paste the result back at the cursor.",
+      icon: LockKeyhole,
+    },
+    {
+      id: "hotkey",
+      eyebrow: "Shortcut",
+      title: "Learn your shortcut.",
+      summary: "First hold the shortcut while speaking, then try pressing once to start and once to stop. Each test transcribes here.",
+      icon: Keyboard,
+    },
+    {
+      id: "paste-mode",
+      eyebrow: "Paste Mode",
+      title: "Try both paste modes.",
+      summary: "Fast pastes immediately. Clean waits for polished text.",
+      icon: Sparkles,
+    },
+    {
+      id: "finish",
+      eyebrow: "Ready",
+      title: "Ready from anywhere.",
+      summary: "Use the shortcut you tested and Dicta Fun will paste the transcript where your cursor is focused.",
+      icon: Check,
+    },
+  ];
+}
 
 function OnboardingFlow({
   settings,
@@ -1879,15 +2123,22 @@ function OnboardingFlow({
   const [stepIndex, setStepIndex] = useState(0);
   const [micCheck, setMicCheck] = useState<"idle" | "checking" | "granted" | "denied">("idle");
   const [shortcutComplete, setShortcutComplete] = useState(false);
+  const [pasteModeComplete, setPasteModeComplete] = useState(false);
+  const onboardingSteps = onboardingStepsFor(settings.displayLanguage);
   const step = onboardingSteps[stepIndex];
   const StepIcon = step.icon;
+  const stepTransitionKey = `${step.id}-${settings.displayLanguage}`;
   const isLast = stepIndex === onboardingSteps.length - 1;
   const canGoBack = stepIndex > 0;
-  const canContinue = step.id !== "hotkey" || shortcutComplete;
+  const canContinue =
+    (step.id !== "hotkey" || shortcutComplete || canSkipOnboarding) &&
+    (step.id !== "paste-mode" || pasteModeComplete);
 
   async function completeOnboarding() {
     log.info("Completing onboarding");
     await onPatchSettings({ onboardingComplete: true });
+    // Privacy: onboarding analytics records completion only, never user-entered settings or trial transcript text.
+    capture("onboarding_completed", { completedStep: step.id, skipped: step.id !== "finish" });
   }
 
   async function checkMicrophone() {
@@ -1914,7 +2165,7 @@ function OnboardingFlow({
 
   return (
     <main className="onboarding-shell">
-      <section className="onboarding-window glass-panel-strong">
+      <section className="onboarding-window">
         <aside className="onboarding-sidebar">
           <BrandMark />
           <ol className="onboarding-steps" aria-label="Onboarding progress">
@@ -1933,33 +2184,57 @@ function OnboardingFlow({
         </aside>
 
         <section className="onboarding-content" data-step={step.id} aria-labelledby="onboarding-title">
-          <div className="onboarding-copy">
-            {StepIcon && (
-              <div className="onboarding-icon">
-                <StepIcon size={26} />
-              </div>
-            )}
-            <p className="onboarding-eyebrow">{step.eyebrow}</p>
-            <h1 id="onboarding-title">{step.title}</h1>
-            <p>{step.summary}</p>
-          </div>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={`${stepTransitionKey}-copy`}
+              className="onboarding-copy"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+            >
+              <p className="onboarding-eyebrow">
+                {StepIcon && <StepIcon size={15} aria-hidden="true" />}
+                <span>{step.eyebrow}</span>
+              </p>
+              <h1 id="onboarding-title">{step.title}</h1>
+              <p>{step.summary}</p>
+            </motion.div>
+          </AnimatePresence>
 
-          <div className="onboarding-detail">
-            {step.id === "welcome" && <WelcomeStep settings={settings} runtime={runtime} />}
-            {step.id === "plan" && <PlanStep />}
-            {step.id === "permissions" && (
-              <PermissionsStep runtime={runtime} micCheck={micCheck} onCheckMicrophone={checkMicrophone} onRefresh={onRefresh} />
-            )}
-            {step.id === "hotkey" && (
-              <HotkeyTeachStep
-                settings={settings}
-                runtime={runtime}
-                onCompletionChange={setShortcutComplete}
-                onPatchSettings={onPatchSettings}
-              />
-            )}
-            {step.id === "finish" && <FinishStep settings={settings} runtime={runtime} />}
-          </div>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={`${stepTransitionKey}-detail`}
+              className="onboarding-detail"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+            >
+              {step.id === "language" && <LanguageStep settings={settings} onPatchSettings={onPatchSettings} />}
+              {step.id === "welcome" && <WelcomeStep settings={settings} runtime={runtime} />}
+              {step.id === "plan" && <PlanStep />}
+              {step.id === "permissions" && (
+                <PermissionsStep runtime={runtime} micCheck={micCheck} onCheckMicrophone={checkMicrophone} onRefresh={onRefresh} />
+              )}
+              {step.id === "hotkey" && (
+                <HotkeyTeachStep
+                  settings={settings}
+                  runtime={runtime}
+                  onCompletionChange={setShortcutComplete}
+                  onPatchSettings={onPatchSettings}
+                />
+              )}
+              {step.id === "paste-mode" && (
+                <PasteModeTeachStep
+                  settings={settings}
+                  onCompletionChange={setPasteModeComplete}
+                  onPatchSettings={onPatchSettings}
+                />
+              )}
+              {step.id === "finish" && <FinishStep settings={settings} runtime={runtime} />}
+            </motion.div>
+          </AnimatePresence>
 
           <footer className="onboarding-actions">
             <TextButton variant="glass" disabled={!canGoBack} onClick={() => setStepIndex((current) => Math.max(0, current - 1))}>
@@ -1986,7 +2261,12 @@ function OnboardingFlow({
                 </>
               ) : step.id === "hotkey" && !shortcutComplete ? (
                 <>
-                  Complete Both Tests
+                  {canSkipOnboarding ? "Continue (Dev Skip)" : "Complete Both Tests"}
+                  <ArrowRight size={17} />
+                </>
+              ) : step.id === "paste-mode" && !pasteModeComplete ? (
+                <>
+                  Try Both Modes
                   <ArrowRight size={17} />
                 </>
               ) : (
@@ -2003,12 +2283,67 @@ function OnboardingFlow({
   );
 }
 
+function LanguageStep({
+  settings,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  const options: Array<{
+    value: AppSettings["displayLanguage"];
+    transcriptionLanguage: string;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: "en",
+      transcriptionLanguage: "en",
+      label: "English",
+      description: "Use English for setup, examples, and transcription tests.",
+    },
+    {
+      value: "fr-FR",
+      transcriptionLanguage: "fr",
+      label: "Français",
+      description: "Utiliser le français pour la configuration, les exemples et les tests de dictée.",
+    },
+  ];
+
+  return (
+    <div className="language-pick">
+      <div className="language-pick__options" role="radiogroup" aria-label="Onboarding language">
+        {options.map((option) => (
+          <label
+            key={option.value}
+            className={cn("language-pick__option", settings.displayLanguage === option.value && "language-pick__option--active")}
+          >
+            <input
+              type="radio"
+              name="onboarding-language"
+              value={option.value}
+              checked={settings.displayLanguage === option.value}
+              onChange={() => void onPatchSettings({ displayLanguage: option.value, language: option.transcriptionLanguage })}
+            />
+            <Globe size={20} />
+            <span>{option.label}</span>
+            <small>{option.description}</small>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WelcomeStep({ settings, runtime }: { settings: AppSettings; runtime: RuntimeStatus }) {
   return (
     <div className="onboarding-preview">
       <div className="shortcut-preview">
-        <span className="shortcut-preview__label">Shortcut</span>
-        <HotkeyChip hotkey={settings.hotkey} />
+        <span className="shortcut-preview__label">
+          <Keyboard size={14} aria-hidden="true" />
+          <span>Shortcut</span>
+        </span>
+        <HotkeyChip hotkey={settings.hotkey} platform={runtime.platform} />
       </div>
       <div className="mini-overlay">
         <span className="status-dot" data-state={runtime.whisper === "ready" ? "complete" : "processing"} />
@@ -2016,11 +2351,20 @@ function WelcomeStep({ settings, runtime }: { settings: AppSettings; runtime: Ru
         <p>Overlay ready</p>
       </div>
       <div className="flow-row" aria-label="Dictation flow">
-        <span>Press</span>
+        <span className="flow-row__item">
+          <Keyboard size={14} aria-hidden="true" />
+          <span>Press</span>
+        </span>
         <ChevronRight size={15} />
-        <span>Speak</span>
+        <span className="flow-row__item">
+          <Mic size={14} aria-hidden="true" />
+          <span>Speak</span>
+        </span>
         <ChevronRight size={15} />
-        <span>Paste</span>
+        <span className="flow-row__item">
+          <ClipboardPaste size={14} aria-hidden="true" />
+          <span>Paste</span>
+        </span>
       </div>
     </div>
   );
@@ -2028,10 +2372,13 @@ function WelcomeStep({ settings, runtime }: { settings: AppSettings; runtime: Ru
 
 function PlanStep() {
   return (
-    <div className="plan-preview glass-panel-subtle">
+    <div className="plan-preview">
       <div className="plan-preview__header">
-        <span>Free weekly words</span>
-        <strong>2,000</strong>
+        <span className="plan-preview__label">Free weekly words</span>
+        <div className="plan-preview__count">
+          <strong>2,000</strong>
+          <span>words</span>
+        </div>
       </div>
       <div className="plan-preview__bar" aria-hidden="true">
         <div className="plan-preview__bar-fill" />
@@ -2043,13 +2390,15 @@ function PlanStep() {
         </div>
         <div>
           <CheckCircle2 size={16} />
-          <span>Upgrade CTA when you need more room</span>
+          <span>Upgrade prompt when you need more room</span>
         </div>
       </div>
-      <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("pricing")}>
-        <Star size={17} />
-        View Upgrade Options
-      </TextButton>
+      <div className="plan-preview__footer">
+        <TextButton variant="glass" onClick={() => window.electronAPI.openWebRoute("pricing")}>
+          <Star size={17} />
+          View upgrade options
+        </TextButton>
+      </div>
     </div>
   );
 }
@@ -2325,9 +2674,12 @@ function HotkeyTeachStep({
 
   return (
     <div className="hotkey-teach">
-      <div className="hotkey-teach__shortcut glass-panel-subtle">
-        <span>Shortcut</span>
-        <HotkeyChip hotkey={settings.hotkey} />
+      <div className="hotkey-teach__shortcut">
+        <span className="hotkey-teach__shortcut-label">
+          <Keyboard size={14} aria-hidden="true" />
+          <span>Shortcut</span>
+        </span>
+        <HotkeyChip hotkey={settings.hotkey} platform={runtime.platform} />
       </div>
 
       <ShortcutTrialCard
@@ -2420,7 +2772,7 @@ function ShortcutTrialCard({
   return (
     <article
       className={cn(
-        "hotkey-teach__trial glass-panel-subtle",
+        "hotkey-teach__trial",
         active && "hotkey-teach__trial--active",
         done && "hotkey-teach__trial--done",
         disabled && "hotkey-teach__trial--disabled",
@@ -2460,6 +2812,210 @@ function ShortcutTrialCard({
         placeholder={placeholder}
         aria-label={`${title} transcription output`}
       />
+    </article>
+  );
+}
+
+function pasteModeSampleFor(language: AppSettings["displayLanguage"]): { raw: string; clean: string } {
+  if (language === "fr-FR") {
+    return {
+      raw: "rappelle à camille de relire les notes du projet avant la réunion client de demain",
+      clean: "Rappelle à Camille de relire les notes du projet avant la réunion client de demain.",
+    };
+  }
+
+  return {
+    raw: "please remind camille to review the project notes before tomorrow's client meeting",
+    clean: "Please remind Camille to review the project notes before tomorrow's client meeting.",
+  };
+}
+
+function PasteModeTeachStep({
+  settings,
+  onCompletionChange,
+  onPatchSettings,
+}: {
+  settings: AppSettings;
+  onCompletionChange: (complete: boolean) => void;
+  onPatchSettings: (patch: Partial<AppSettings>) => Promise<void>;
+}) {
+  type PasteTrialId = AppSettings["cleanupMode"];
+  type PasteTrialState = {
+    status: "waiting" | "raw" | "cleaning" | "done";
+    output: string;
+  };
+
+  const [trialStates, setTrialStates] = useState<Record<PasteTrialId, PasteTrialState>>({
+    fast: { status: "waiting", output: "" },
+    accurate: { status: "waiting", output: "" },
+  });
+  const timersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const sample = pasteModeSampleFor(settings.displayLanguage);
+  const pasteOptions = pasteModeOptions(settings.displayLanguage);
+  const isFrench = settings.displayLanguage === "fr-FR";
+  const fastDone = trialStates.fast.status === "done";
+  const cleanDone = trialStates.accurate.status === "done";
+  const bothDone = fastDone && cleanDone;
+  const trialRunning = Object.values(trialStates).some((state) => state.status === "raw" || state.status === "cleaning");
+
+  const clearTimers = useCallback(() => {
+    timersRef.current.forEach((timer) => clearTimeout(timer));
+    timersRef.current = [];
+  }, []);
+
+  useEffect(() => {
+    onCompletionChange(bothDone);
+  }, [bothDone, onCompletionChange]);
+
+  useEffect(() => clearTimers, [clearTimers]);
+
+  const updateTrial = useCallback((trial: PasteTrialId, patch: Partial<PasteTrialState>) => {
+    setTrialStates((current) => ({
+      ...current,
+      [trial]: {
+        ...current[trial],
+        ...patch,
+      },
+    }));
+  }, []);
+
+  const runTrial = useCallback((trial: PasteTrialId) => {
+    if (trialRunning) return;
+    void onPatchSettings({ cleanupEnabled: true, cleanupMode: trial });
+
+    if (trial === "fast") {
+      updateTrial("fast", { status: "raw", output: sample.raw });
+      timersRef.current.push(
+        setTimeout(() => updateTrial("fast", { status: "cleaning", output: sample.raw }), 650),
+        setTimeout(() => updateTrial("fast", { status: "done", output: sample.clean }), 1450),
+      );
+      return;
+    }
+
+    updateTrial("accurate", { status: "cleaning", output: "" });
+    timersRef.current.push(
+      setTimeout(() => updateTrial("accurate", { status: "done", output: sample.clean }), 1100),
+    );
+  }, [onPatchSettings, sample.clean, sample.raw, trialRunning, updateTrial]);
+
+  return (
+    <div className="paste-mode-teach">
+      <div className="paste-mode-teach__trials">
+        <PasteModeTrialCard
+          mode="fast"
+          language={settings.displayLanguage}
+          title={isFrench ? "Rapide" : "Fast"}
+          description={isFrench ? "Colle, puis corrige." : "Paste, then clean."}
+          state={trialStates.fast}
+          disabled={trialRunning || fastDone}
+          onRun={() => runTrial("fast")}
+        />
+        <PasteModeTrialCard
+          mode="accurate"
+          language={settings.displayLanguage}
+          title={isFrench ? "Propre" : "Clean"}
+          description={isFrench ? "Corrige, puis colle." : "Clean, then paste."}
+          state={trialStates.accurate}
+          disabled={trialRunning || cleanDone}
+          onRun={() => runTrial("accurate")}
+        />
+      </div>
+
+      {bothDone && (
+        <div className="paste-mode-teach__pick">
+          <p className="paste-mode-teach__pick-label">{isFrench ? "Mode par défaut" : "Default paste mode"}</p>
+          <div className="settings-mode-options" role="radiogroup" aria-label="Default paste mode">
+            {pasteOptions.map((option) => {
+              const Icon = option.icon;
+              return (
+                <label
+                  key={option.value}
+                  className={cn("settings-mode-option", settings.cleanupMode === option.value && "settings-mode-option--active")}
+                >
+                  <input
+                    type="radio"
+                    name="paste-mode-onboarding"
+                    value={option.value}
+                    checked={settings.cleanupMode === option.value}
+                    onChange={() => void onPatchSettings({ cleanupEnabled: true, cleanupMode: option.value })}
+                  />
+                  <Icon size={17} />
+                  <span>{option.label}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PasteModeTrialCard({
+  mode,
+  language,
+  title,
+  description,
+  state,
+  disabled,
+  onRun,
+}: {
+  mode: AppSettings["cleanupMode"];
+  language: AppSettings["displayLanguage"];
+  title: string;
+  description: string;
+  state: {
+    status: "waiting" | "raw" | "cleaning" | "done";
+    output: string;
+  };
+  disabled: boolean;
+  onRun: () => void;
+}) {
+  const Icon = mode === "fast" ? Copy : Sparkles;
+  const isFrench = language === "fr-FR";
+  const statusLabel = state.status === "waiting"
+    ? isFrench ? "Prêt" : "Ready"
+    : state.status === "raw"
+      ? isFrench ? "Collé" : "Pasted"
+      : state.status === "cleaning"
+        ? mode === "fast"
+          ? isFrench ? "Correction" : "Cleaning"
+          : isFrench ? "Correction" : "Cleaning"
+        : isFrench ? "Terminé" : "Complete";
+  const placeholder = state.status === "waiting"
+    ? isFrench ? "Lancez le test." : "Run the test."
+    : state.status === "cleaning" && mode === "accurate"
+      ? isFrench ? "Attente du texte corrigé..." : "Waiting for cleaned text..."
+      : "";
+  const dotState = state.status === "done" ? "complete" : state.status === "waiting" ? "idle" : "processing";
+
+  return (
+    <article className={cn("paste-mode-teach__trial", state.status === "done" && "paste-mode-teach__trial--done")}>
+      <div className="paste-mode-teach__trial-header">
+        <Icon size={18} />
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+        {state.status === "done" && <CheckCircle2 size={17} className="paste-mode-teach__check" />}
+      </div>
+      <div className="paste-mode-teach__status">
+        <span className="status-dot" data-state={dotState} />
+        <span>{statusLabel}</span>
+      </div>
+      <textarea
+        className="paste-mode-teach__textarea"
+        readOnly
+        value={state.output}
+        placeholder={placeholder}
+        aria-label={`${title} paste output`}
+      />
+      <div className="paste-mode-teach__trial-action">
+        <TextButton variant="glass" disabled={disabled} onClick={onRun}>
+          <Icon size={17} />
+          {state.status === "done" ? isFrench ? "Testé" : "Tested" : isFrench ? `Tester ${title}` : `Test ${title}`}
+        </TextButton>
+      </div>
     </article>
   );
 }
@@ -2576,8 +3132,11 @@ function whisperStatusLabel(status: RuntimeStatus["whisper"]): string {
 }
 
 function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: RuntimeStatus }) {
+  const modeLabel = settings.mode === "tap-to-talk" ? "Tap to talk" : "Push to talk";
+  const pasteLabel = settings.cleanupMode === "fast" ? "Fast" : "Clean";
+
   return (
-    <div className="finish-card glass-panel-subtle">
+    <div className="finish-card">
       <div className="finish-card__header">
         <div className="finish-card__mic">
           <Mic size={30} />
@@ -2590,16 +3149,38 @@ function FinishStep({ settings, runtime }: { settings: AppSettings; runtime: Run
       </div>
       <dl className="finish-card__status">
         <div className="finish-card__status-item">
-          <dt>Shortcut</dt>
-          <dd><HotkeyChip hotkey={settings.hotkey} /></dd>
+          <dt>
+            <Keyboard size={14} aria-hidden="true" />
+            <span>Shortcut</span>
+          </dt>
+          <dd><HotkeyChip hotkey={settings.hotkey} platform={runtime.platform} /></dd>
         </div>
         <div className="finish-card__status-item">
           <dt>Mode</dt>
-          <dd>{settings.mode === "tap-to-talk" ? "Tap to talk" : "Push to talk"}</dd>
+          <dd>
+            <span className="finish-card__status-value">
+              <Hand size={14} aria-hidden="true" />
+              <span>{modeLabel}</span>
+            </span>
+          </dd>
+        </div>
+        <div className="finish-card__status-item">
+          <dt>Paste</dt>
+          <dd>
+            <span className="finish-card__status-value">
+              {settings.cleanupMode === "fast" ? <Zap size={14} aria-hidden="true" /> : <Sparkles size={14} aria-hidden="true" />}
+              <span>{pasteLabel}</span>
+            </span>
+          </dd>
         </div>
         <div className="finish-card__status-item">
           <dt>AI Model</dt>
-          <dd>{whisperStatusLabel(runtime.whisper)}</dd>
+          <dd>
+            <span className="finish-card__status-value" data-ok={runtime.whisper === "ready"}>
+              <CheckCircle2 size={14} aria-hidden="true" />
+              <span>{whisperStatusLabel(runtime.whisper)}</span>
+            </span>
+          </dd>
         </div>
       </dl>
       <div className="finish-card__actions">

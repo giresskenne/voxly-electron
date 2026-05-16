@@ -1,6 +1,7 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { sanitizeLogValue } from "../shared/redaction";
 
 type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 
@@ -94,9 +95,9 @@ class DebugLogger {
 
   private formatMeta(meta: unknown): string {
     if (meta === undefined) return "";
-    if (typeof meta === "string") return meta;
+    if (typeof meta === "string") return String(sanitizeLogValue(meta));
     try {
-      return JSON.stringify(serializeValue(meta), null, 2);
+      return JSON.stringify(sanitizeLogValue(meta), null, 2);
     } catch {
       return String(meta);
     }
@@ -124,7 +125,7 @@ class DebugLogger {
           : console.log;
 
     if (meta !== undefined) {
-      consoleFn(`${levelTag}${scopeTag}${sourceTag} ${message}`, meta);
+      consoleFn(`${levelTag}${scopeTag}${sourceTag} ${message}`, sanitizeLogValue(meta));
     } else {
       consoleFn(`${levelTag}${scopeTag}${sourceTag} ${message}`);
     }
@@ -147,13 +148,6 @@ class DebugLogger {
       error: (message: string, details?: unknown) => this.write("error", message, details, scope),
     };
   }
-}
-
-function serializeValue(value: unknown): unknown {
-  if (value instanceof Error) {
-    return { name: value.name, message: value.message, stack: value.stack };
-  }
-  return value;
 }
 
 export const mainLogger = new DebugLogger();

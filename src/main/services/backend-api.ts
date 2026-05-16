@@ -139,6 +139,38 @@ function normalizePath(path: string): string {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
+// ─── AI warmup ───────────────────────────────────────────────────────────────
+
+let warmupLastAt = 0;
+const WARMUP_TTL_MS = 6 * 60 * 1000; // 6 minutes
+
+/**
+ * Fire-and-forget AI warmup. Calls GET /ai/warmup to keep the backend warm.
+ * Also pre-populates the AI capabilities cache. Throttled to WARMUP_TTL_MS.
+ * Fails silently — callers should void the promise.
+ */
+export async function warmupAi(): Promise<void> {
+  const now = Date.now();
+  if (now - warmupLastAt < WARMUP_TTL_MS) return;
+  warmupLastAt = now; // optimistic — prevents parallel calls
+  const baseUrl = resolveBackendBaseUrl();
+  if (!baseUrl) return;
+  const token = await getBackendSessionToken();
+  if (!token) return;
+  try {
+    // Pre-warm the capabilities cache in parallel.
+    void getBackendAiCapabilities();
+    await fetch(`${baseUrl}/ai/warmup`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    log.debug("AI warmup complete");
+  } catch {
+    log.debug("AI warmup failed — continuing");
+    warmupLastAt = 0; // allow retry on next dictation
+  }
+}
+
 type AiCapabilities = { cleanup: boolean; transcription: boolean };
 let cachedCapabilities: AiCapabilities | null = null;
 let capabilitiesFetchedAt = 0;

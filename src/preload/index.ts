@@ -3,10 +3,12 @@ import type {
   AppSettings,
   AudioChunk,
   BillingInterval,
+  CleanupLaterResult,
   CheckoutSession,
   DesktopUpdateStatus,
   EntitlementStatus,
   LangMismatch,
+  MainDictationTiming,
   PasteResult,
   PaidPlan,
   ReferralStatus,
@@ -15,6 +17,7 @@ import type {
   WeeklyUsageStatus,
 } from "../main/types";
 import { createPreloadLogger } from "./debug-log";
+import { sanitizeLogValue } from "../shared/redaction";
 
 const log = createPreloadLogger("preload");
 
@@ -23,6 +26,7 @@ type TranscribeResult = {
   originalText: string;
   record: TranscriptionRecord | null;
   langMismatch: LangMismatch | null;
+  timing?: MainDictationTiming;
 };
 type TranscribeOptions = Partial<AppSettings> & {
   saveToHistory?: boolean;
@@ -35,6 +39,8 @@ const api = {
   getWordCountThisWeek: () => invoke<WeeklyUsageStatus>("history:word-count-this-week"),
   transcribeLocalWhisper: (buffer: ArrayBuffer, options?: TranscribeOptions, chunks?: AudioChunk[]) =>
     invoke<TranscribeResult>("transcribe:local-whisper", buffer, options, chunks),
+  cleanupTranscriptionLater: (text: string, options?: TranscribeOptions) =>
+    invoke<CleanupLaterResult>("transcription:cleanup-later", text, options),
   pasteText: (text: string) => invoke<PasteResult>("paste:text", text),
   replaceLastPastedText: (previousText: string, nextText: string) =>
     invoke<PasteResult>("paste:replace-last", previousText, nextText),
@@ -147,8 +153,24 @@ const api = {
 };
 
 function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
-  log.debug("Invoking IPC", { channel, args });
+  log.debug("Invoking IPC", { channel, args: summarizeIpcArgs(channel, args) });
   return ipcRenderer.invoke(channel, ...args) as Promise<T>;
+}
+
+function summarizeIpcArgs(channel: string, args: unknown[]): unknown[] {
+  switch (channel) {
+    case "auth:set-session-token":
+      return args.map((arg) => typeof arg === "string" && arg ? "<redacted>" : arg);
+    case "paste:text":
+    case "transcription:cleanup-later":
+      return args.map((arg, index) => index === 0 && typeof arg === "string" ? { textLength: arg.length } : sanitizeLogValue(arg));
+    case "paste:replace-last":
+      return args.map((arg) => typeof arg === "string" ? { textLength: arg.length } : sanitizeLogValue(arg));
+    case "translate:text":
+      return args.map((arg, index) => index === 0 && typeof arg === "string" ? { textLength: arg.length } : sanitizeLogValue(arg));
+    default:
+      return args.map(sanitizeLogValue);
+  }
 }
 
 log.info("Exposing Electron API");
