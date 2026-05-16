@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.1.0-feat-rearchitecture-the-app-flow-for-speed.2",
+  "version": "1.1.0",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
