@@ -48,6 +48,14 @@
   "build": {
     "appId": "com.dictafun.desktop",
     "productName": "Dicta Fun",
+    "protocols": [
+      {
+        "name": "Dicta Fun",
+        "schemes": [
+          "dictafun"
+        ]
+      }
+    ],
     "files": [
       "out/**/*",
       "resources/**/*",
