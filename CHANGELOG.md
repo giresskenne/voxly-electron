@@ -1,3 +1,10 @@
+## [1.1.1-fix-windows-app-fix.1](https://github.com/giresskenne/voxly-electron/compare/v1.1.0...v1.1.1-fix-windows-app-fix.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* stabilize windows dictation release ([5bec930](https://github.com/giresskenne/voxly-electron/commit/5bec9301cb384d55f6f0a4a341681c653136dc7d))
+
 # [1.1.0](https://github.com/giresskenne/voxly-electron/compare/v1.0.5...v1.1.0) (2026-05-16)
 
 

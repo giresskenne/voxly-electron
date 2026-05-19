@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.1.0",
+  "version": "1.1.1-fix-windows-app-fix.1",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
