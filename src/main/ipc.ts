@@ -8,8 +8,9 @@ import { groqTranscriptionService } from "./services/groq";
 import { openAiCleanupService } from "./services/openai-cleanup";
 import { pasteText, replaceLastPastedText } from "./services/paste";
 import { windows } from "./window-manager";
-import { registerDictationHotkey } from "./services/hotkeys";
+import { registerDictationHotkey, unregisterHotkeys } from "./services/hotkeys";
 import { globeKeyManager } from "./services/globe-key-manager";
+import { windowsUiohookHotkeyManager } from "./services/windows-uiohook-hotkey-manager";
 import { createMainLogger, getLogLevel, logRendererEntry } from "./debug-log";
 import type { AudioChunk } from "./types";
 import { entitlementService } from "./services/entitlements";
@@ -18,6 +19,7 @@ import { updateChecker } from "./services/update-checker";
 import { MOCK_TRANSCRIPTION_TEXT } from "./services/mock-transcription";
 import { buildWeeklyUsageStatus, countWords } from "./services/usage-policy";
 import { fetchBackend, getBackendSessionToken, parseBackendError, setOnSessionExpired, BackendRejectedError, warmupAi } from "./services/backend-api";
+import { desktopAuthCallbackService } from "./services/desktop-auth-callback";
 
 let hotkeyRegistered = false;
 const log = createMainLogger("ipc");
@@ -26,6 +28,7 @@ const PUSH_STOP_COOLDOWN_MS = 300;
 const TAP_TOGGLE_DEBOUNCE_MS = 250;
 const SHORT_CLEANUP_MIN_WORDS = 5;
 const SHORT_CLEANUP_MIN_CHARS = 25;
+const DICTIONARY_PROMPT_LEAK_MAX_WORDS = 8;
 let pushKeyDownAt = 0;
 let pushKeyIsRecording = false;
 let pushLastStopAt = 0;
@@ -105,18 +108,7 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("auth:set-session-token", async (_, token: string, refreshToken?: string) => {
-    await entitlementService.setSessionToken(token, refreshToken);
-    const entitlements = await entitlementService.refresh(true);
-    await applyEntitlementGates(entitlements);
-    // Fire-and-forget AI warmup after login so the first dictation is faster.
-    void warmupAi();
-    log.info("Session token updated", {
-      authenticated: entitlements.isAuthenticated,
-      billingPlan: entitlements.billingPlan,
-      billingStatus: entitlements.billingStatus,
-      hasRefreshToken: Boolean(refreshToken?.trim()),
-    });
-    return entitlements;
+    return applySessionToken(token, refreshToken, "ipc");
   });
 
   ipcMain.handle("auth:clear-session-token", async () => {
@@ -194,10 +186,15 @@ export function registerIpc(): void {
       saveToHistory,
     });
     const entitlement = await entitlementService.refresh();
+    const storedSettings = settingsStore.get();
     const settings = entitlementService.gateSettings(
-      { ...settingsStore.get(), ...options },
+      { ...storedSettings, ...options },
       entitlement,
     );
+    if (!entitlement.isAuthenticated && storedSettings.guestTrialUsed) {
+      log.warn("Guest trial blocked transcription until sign-in");
+      throw new Error("Sign in to keep using Dicta.");
+    }
 
     const t0 = Date.now();
     const originalText = await transcribeAudio(buffer, settings, chunks ?? []);
@@ -217,6 +214,21 @@ export function registerIpc(): void {
     });
 
     // Nothing was said — skip cleanup, DB save, and paste.
+    if (isLikelyDictionaryPromptLeak(originalText, settings.customDictionary)) {
+      log.warn("Dictionary prompt leak detected; treating transcript as blank audio", {
+        textLength: originalText.length,
+        wordCount: countWords(originalText),
+        dictionarySize: settings.customDictionary.length,
+      });
+      return {
+        text: "",
+        originalText: "",
+        record: null,
+        langMismatch: null,
+        timing: buildMainTiming(settings, transcribeMs, 0, 0, true, "not_requested"),
+      };
+    }
+
     if (!originalText.trim()) {
       log.info("IPC transcribe:local-whisper — blank audio, aborting pipeline");
       return {
@@ -596,7 +608,7 @@ export function registerIpc(): void {
     }
   });
 
-  ipcMain.handle("app:open-web-route", (_, route: "pricing" | "signup" | "signin" | "privacy" | "terms" | "help" | "feedback" | "referral") => {
+  ipcMain.handle("app:open-web-route", async (_, route: "pricing" | "signup" | "signin" | "privacy" | "terms" | "help" | "feedback" | "referral") => {
     const base = resolveWebBaseUrl();
     const routes = {
       pricing: `${base}/pricing`,
@@ -609,7 +621,16 @@ export function registerIpc(): void {
       feedback: `${base}/feedback`,
       referral: `${base}/referral`,
     } as const;
-    const url = routes[route];
+    let url: string = routes[route];
+    if (route === "signin") {
+      const callback = await desktopAuthCallbackService.getCallbackParams(async ({ token, refreshToken }) => {
+        await applySessionToken(token, refreshToken, "loopback");
+      });
+      const parsed = new URL(url);
+      parsed.searchParams.set("desktop_port", String(callback.port));
+      parsed.searchParams.set("desktop_nonce", callback.nonce);
+      url = parsed.toString();
+    }
     log.debug("IPC app:open-web-route", { route, url });
     return shell.openExternal(url);
   });
@@ -658,7 +679,7 @@ export function registerIpc(): void {
   });
 }
 
-async function applyEntitlementGates(entitlements: ReturnType<typeof entitlementService.getCached>): Promise<AppSettings> {
+export async function applyEntitlementGates(entitlements: ReturnType<typeof entitlementService.getCached>): Promise<AppSettings> {
   const current = settingsStore.get();
   const gated = entitlementService.gateSettings(current, entitlements);
 
@@ -680,6 +701,50 @@ async function applyEntitlementGates(entitlements: ReturnType<typeof entitlement
   }
   windows.sendSettingsUpdated(settings);
   windows.sendRuntimeStatus(getRuntimeStatus());
+  return settings;
+}
+
+async function applySessionToken(
+  token: string,
+  refreshToken: string | undefined,
+  source: "ipc" | "loopback",
+): Promise<ReturnType<typeof entitlementService.getCached>> {
+  await entitlementService.setSessionToken(token, refreshToken);
+  const entitlements = await entitlementService.refresh(true);
+  const settings = await applyPostSignInSettings(entitlements);
+  windows.sendSettingsUpdated(settings);
+  windows.sendSessionUpdated(entitlements);
+  windows.openSettingsTab("account");
+  // Fire-and-forget AI warmup after login so the first dictation is faster.
+  void warmupAi();
+  log.info("Session token updated", {
+    source,
+    authenticated: entitlements.isAuthenticated,
+    billingPlan: entitlements.billingPlan,
+    billingStatus: entitlements.billingStatus,
+    hasRefreshToken: Boolean(refreshToken?.trim()),
+  });
+  return entitlements;
+}
+
+export async function applyPostSignInSettings(entitlements: ReturnType<typeof entitlementService.getCached>): Promise<AppSettings> {
+  let settings = await applyEntitlementGates(entitlements);
+
+  if (
+    entitlements.isAuthenticated &&
+    entitlements.canUseCloudTranscription &&
+    settings.transcriptionMode !== "cloud"
+  ) {
+    settings = await settingsStore.save({ transcriptionMode: "cloud" });
+    await whisperService.prewarm(settings);
+    windows.sendSettingsUpdated(settings);
+    windows.sendRuntimeStatus(getRuntimeStatus());
+    log.info("Cloud transcription enabled after sign-in", {
+      billingPlan: entitlements.billingPlan,
+      billingStatus: entitlements.billingStatus,
+    });
+  }
+
   return settings;
 }
 
@@ -707,6 +772,8 @@ export function getRuntimeStatus(): RuntimeStatus {
 }
 
 async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunks: AudioChunk[]): Promise<string> {
+  const audioBytes = buffer.byteLength;
+
   if (settings.mockTranscription) {
     log.debug("Returning mock transcription", { transcriptionMode: settings.transcriptionMode });
     await new Promise((resolve) => setTimeout(resolve, 650));
@@ -716,12 +783,30 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
   // Respect the user's explicit transcription mode — skip cloud entirely in local mode.
   if (settings.transcriptionMode === "local") {
     log.debug("transcriptionMode=local — using Whisper directly");
-    return whisperService.transcribe(buffer, settings);
+    const t0 = Date.now();
+    const text = await whisperService.transcribe(buffer, settings);
+    log.info("Transcription benchmark", {
+      provider: "local-whisper",
+      elapsedMs: Date.now() - t0,
+      audioBytes,
+      textLength: text.length,
+      wordCount: countWords(text),
+    });
+    return text;
   }
 
   // Cloud mode: try Groq/backend first.
+  const tCloud = Date.now();
   try {
-    return await groqTranscriptionService.transcribe(buffer, settings, chunks);
+    const text = await groqTranscriptionService.transcribe(buffer, settings, chunks);
+    log.info("Transcription benchmark", {
+      provider: "groq-cloud",
+      elapsedMs: Date.now() - tCloud,
+      audioBytes,
+      textLength: text.length,
+      wordCount: countWords(text),
+    });
+    return text;
   } catch (err) {
     // If the backend is reachable but explicitly rejected the request (auth, limit, etc.),
     // do NOT fall back to local Whisper — surface the error to the user.
@@ -732,14 +817,23 @@ async function transcribeAudio(buffer: ArrayBuffer, settings: AppSettings, chunk
     const msg = err instanceof Error ? err.message : String(err);
     const isExpectedFallback = msg.includes("unavailable") || msg.includes("no API key");
     if (isExpectedFallback) {
-      log.debug("Groq unavailable — using local Whisper", { reason: msg });
+      log.debug("Groq unavailable — using local Whisper", { reason: msg, groqElapsedMs: Date.now() - tCloud });
     } else {
-      log.warn("Groq transcription failed — falling back to local Whisper", { error: msg });
+      log.warn("Groq transcription failed — falling back to local Whisper", { error: msg, groqElapsedMs: Date.now() - tCloud });
     }
   }
 
   // Fallback: local Whisper server.
-  return whisperService.transcribe(buffer, settings);
+  const tFallback = Date.now();
+  const text = await whisperService.transcribe(buffer, settings);
+  log.info("Transcription benchmark", {
+    provider: "local-whisper-fallback",
+    elapsedMs: Date.now() - tFallback,
+    audioBytes,
+    textLength: text.length,
+    wordCount: countWords(text),
+  });
+  return text;
 }
 
 async function cleanupTranscript(originalText: string, settings: AppSettings): Promise<CleanupOutcome> {
@@ -768,6 +862,30 @@ async function cleanupTranscript(originalText: string, settings: AppSettings): P
     cleanupSkipped: false,
     cleanupStatus,
   };
+}
+
+function isLikelyDictionaryPromptLeak(text: string, dictionary: string[]): boolean {
+  const normalizedText = normalizePromptLeakText(text);
+  const normalizedPrompt = normalizePromptLeakText(dictionary.join(" "));
+  if (!normalizedText || !normalizedPrompt) return false;
+  if (normalizedText === normalizedPrompt) return true;
+
+  // Every word in the transcript is a dictionary word — no non-dictionary filler at all.
+  // A genuine transcription almost always contains at least one word not in the dictionary
+  // (connectives, pronouns, etc.), so this is a strong signal of a prompt echo.
+  const textWords = normalizedText.split(" ");
+  if (textWords.length < 2 || textWords.length > DICTIONARY_PROMPT_LEAK_MAX_WORDS) return false;
+
+  const dictionaryWordSet = new Set(normalizedPrompt.split(" "));
+  return textWords.every((word) => dictionaryWordSet.has(word));
+}
+
+function normalizePromptLeakText(text: string): string {
+  return text
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildMainTiming(
@@ -801,8 +919,21 @@ function shouldRefreshWhisper(patch: Partial<AppSettings>): boolean {
 
 function configureDictationHotkey(settings: AppSettings): void {
   resetPushHotkeyState();
-  hotkeyRegistered = registerDictationHotkey(settings.hotkey, handleHotkeyDown);
   globeKeyManager.stop();
+  windowsUiohookHotkeyManager.stop();
+  unregisterHotkeys();
+
+  if (isWindowsUiohookHotkey(settings.hotkey)) {
+    hotkeyRegistered = windowsUiohookHotkeyManager.start(settings.hotkey, {
+      onDown: handleHotkeyDown,
+      onUp: handleHotkeyUp,
+    });
+    if (hotkeyRegistered) return;
+    log.warn("Windows Ctrl+Win listener unavailable; hotkey registration disabled");
+    return;
+  }
+
+  hotkeyRegistered = registerDictationHotkey(settings.hotkey, handleHotkeyDown);
 
   if (isGlobeLikeHotkey(settings.hotkey)) {
     globeKeyManager.start({
@@ -818,9 +949,13 @@ function handleHotkeyDown(): void {
     hotkey: settings.hotkey,
     mode: settings.mode,
     isGlobeLike: isGlobeLikeHotkey(settings.hotkey),
+    isWindowsUiohookHotkey: isWindowsUiohookHotkey(settings.hotkey),
     hotkeyTestCaptureActive,
   });
-  if (settings.mode === "push-to-talk" && isGlobeLikeHotkey(settings.hotkey)) {
+  if (
+    settings.mode === "push-to-talk" &&
+    hasPushReleaseEvents(settings.hotkey)
+  ) {
     logFnFlow("routing hotkey down to push-to-talk hold");
     startPushHold();
     return;
@@ -855,9 +990,13 @@ function handleHotkeyUp(): void {
     hotkey: settings.hotkey,
     mode: settings.mode,
     isGlobeLike: isGlobeLikeHotkey(settings.hotkey),
+    isWindowsUiohookHotkey: isWindowsUiohookHotkey(settings.hotkey),
     pushKeyIsRecording,
   });
-  if (settings.mode !== "push-to-talk" || !isGlobeLikeHotkey(settings.hotkey)) {
+  if (
+    settings.mode !== "push-to-talk" ||
+    !hasPushReleaseEvents(settings.hotkey)
+  ) {
     logFnFlow("ignored hotkey up for current mode/hotkey");
     return;
   }
@@ -905,7 +1044,7 @@ function startPushHold(): void {
       pushKeyDownAt === pressStartedAt &&
       !pushKeyIsRecording &&
       settings.mode === "push-to-talk" &&
-      isGlobeLikeHotkey(settings.hotkey)
+      hasPushReleaseEvents(settings.hotkey)
     ) {
       pushKeyIsRecording = true;
       log.debug("Starting dictation after push-to-talk hold threshold");
@@ -957,6 +1096,14 @@ function resetPushHotkeyState(): void {
 
 function isGlobeLikeHotkey(hotkey: string): boolean {
   return hotkey === "GLOBE" || hotkey === "Fn";
+}
+
+function isWindowsUiohookHotkey(hotkey: string): boolean {
+  return process.platform === "win32" && hotkey === "Control+Super";
+}
+
+function hasPushReleaseEvents(hotkey: string): boolean {
+  return isGlobeLikeHotkey(hotkey) || (isWindowsUiohookHotkey(hotkey) && windowsUiohookHotkeyManager.isRunning());
 }
 
 function getMicrophoneStatus(): RuntimeStatus["microphone"] {

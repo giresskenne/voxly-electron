@@ -77,6 +77,15 @@ test("local mode still calls blobToWav in OverlayApp renderer", () => {
   assert.match(code, /WAV conversion complete/);
 });
 
+test("OverlayApp guards recorder startup and empty audio before WAV decode", () => {
+  const code = src("src/renderer/views/OverlayApp.tsx");
+  assert.match(code, /type DictationState = .*["']starting["']/);
+  assert.match(code, /setState\(["']starting["']\)[\s\S]+recorder\.start/);
+  assert.match(code, /recorder\.start[\s\S]{0,300}setState\(["']recording["']\)/);
+  assert.match(code, /chunksRef\.current\.length === 0 \|\| blob\.size === 0/);
+  assert.match(code, /Empty recording captured; skipping transcription/);
+});
+
 // ─── 3. Warmup behavior ──────────────────────────────────────────────────────
 
 test("warmupAi is throttled with WARMUP_TTL_MS constant", () => {
@@ -231,9 +240,9 @@ test("log redaction removes deep-link tokens and bearer credentials", () => {
 
 test("single-instance lock is acquired at startup", () => {
   const code = src("src/main/main.ts");
-  assert.match(code, /app\.requestSingleInstanceLock\(\)/);
-  // If the lock is not acquired the app must quit
-  assert.match(code, /hasSingleInstanceLock[\s\S]{0,50}app\.quit\(\)/);
+  assert.match(code, /app\.requestSingleInstanceLock\(/);
+  // If the lock is not acquired the app must exit before async startup can create windows.
+  assert.match(code, /if \(!hasSingleInstanceLock\) \{[\s\S]*?process\.exit\(0\)/);
 });
 
 test("overlay window reference is nulled when the window closes", () => {
@@ -246,10 +255,78 @@ test("settings window reference is nulled when the window closes", () => {
   assert.match(code, /settings.*closed[\s\S]{0,200}this\.settings\s*=\s*null/);
 });
 
-test("hotkeys and globe-key listener are unregistered on will-quit", () => {
+test("native hotkey listeners are unregistered on will-quit", () => {
   const code = src("src/main/main.ts");
   assert.match(code, /will-quit[\s\S]{0,300}unregisterHotkeys\(\)/);
   assert.match(code, /will-quit[\s\S]{0,300}globeKeyManager\.stop\(\)/);
+  assert.match(code, /will-quit[\s\S]{0,300}windowsUiohookHotkeyManager\.stop\(\)/);
+});
+
+test("Windows onboarding supports push shortcut test for Ctrl+Win", () => {
+  const code = src("src/renderer/views/SettingsApp.tsx");
+  assert.match(code, /pushTrialSupported\s*=\s*runtime\.platform !== ["']win32["'] \|\| settings\.hotkey === ["']Control\+Super["']/);
+  assert.match(code, /pushTrialSupported \? ["']push["'] : ["']tap["']/);
+  assert.match(code, /pushTrialSupported && activeTrial === ["']push["'] \? ["']push-to-talk["'] : ["']tap-to-talk["']/);
+});
+
+test("Windows defaults use Ctrl+Win push shortcut", () => {
+  const code = src("src/main/services/settings-store.ts");
+  assert.match(code, /WINDOWS_DEFAULT_HOTKEY\s*=\s*["']Control\+Super["']/);
+  assert.match(code, /hotkey:\s*process\.platform === ["']darwin["'] \? ["']GLOBE["'] : WINDOWS_DEFAULT_HOTKEY/);
+  assert.match(code, /LEGACY_WINDOWS_DEFAULT_HOTKEY\s*=\s*["']Control\+Shift\+Space["']/);
+  assert.match(code, /mode:\s*["']push-to-talk["']/);
+  assert.match(code, /next\.mode = ["']push-to-talk["']/);
+});
+
+test("Windows Ctrl+Win uses uiohook before Electron globalShortcut", () => {
+  const code = src("src/main/ipc.ts");
+  assert.match(code, /if \(isWindowsUiohookHotkey\(settings\.hotkey\)\)/);
+  assert.match(code, /windowsUiohookHotkeyManager\.start\(settings\.hotkey/);
+  assert.match(code, /hasPushReleaseEvents\(settings\.hotkey\)/);
+  assert.match(code, /windowsUiohookHotkeyManager\.isRunning\(\)/);
+  assert.match(code, /unregisterHotkeys\(\)/);
+});
+
+test("globalShortcut registration failures do not break settings saves", () => {
+  const code = src("src/main/services/hotkeys.ts");
+  assert.match(code, /try[\s\S]{0,200}globalShortcut\.register/);
+  assert.match(code, /catch \(error\)[\s\S]{0,200}return false/);
+});
+
+test("unsupported push-to-talk shortcuts fall back to tap behavior", () => {
+  const code = src("src/main/ipc.ts");
+  assert.match(code, /Push-to-talk release events are unavailable/);
+  assert.match(code, /sendDictationToggle\(\)/);
+});
+
+test("Windows local Whisper uses configured language to avoid auto-detect latency", () => {
+  const code = src("src/main/services/whisper.ts");
+  assert.match(code, /process\.platform === ["']win32["'][\s\S]{0,120}settings\.language !== ["']auto["']/);
+  assert.match(code, /form\.append\(["']language["'], requestedLanguage\)/);
+});
+
+test("Windows local Whisper disables expensive metadata work for short clips", () => {
+  const code = src("src/main/services/whisper.ts");
+  assert.match(code, /form\.append\(["']no_timestamps["'], ["']true["']\)/);
+  assert.match(code, /form\.append\(["']token_timestamps["'], ["']false["']\)/);
+  assert.match(code, /form\.append\(["']no_language_probabilities["'], ["']true["']\)/);
+  assert.match(code, /const durationMs = estimateWavDurationMs\(buffer\)/);
+  assert.match(code, /form\.append\(["']audio_ctx["'], String\(audioCtx\)\)/);
+  assert.match(code, /if \(durationMs <= 2_000\) return 128/);
+});
+
+test("finish shortcut keeps Ctrl Win keys inline with compact chips", () => {
+  const code = src("src/renderer/styles.css");
+  assert.match(code, /\.finish-card dd \.home-banner__shortcut-keys \{[\s\S]{0,120}flex-wrap: nowrap/);
+  assert.match(code, /\.finish-card dd \.home-banner__shortcut-keys \{[\s\S]{0,160}white-space: nowrap/);
+  assert.match(code, /\.finish-card \.home-banner__key \{[\s\S]{0,120}min-width: 38px/);
+  assert.match(code, /\.finish-card__status-item \{[\s\S]{0,140}padding: 18px 14px/);
+});
+
+test("Windows overlay can return to click-through mode when idle", () => {
+  const code = src("src/main/window-manager.ts");
+  assert.match(code, /setOverlayInteractive\(interactive: boolean\)[\s\S]{0,200}setIgnoreMouseEvents\(!interactive,\s*\{ forward: true \}\)/);
+  assert.ok(!code.includes("process.platform === \"win32\") {\n      this.overlay?.setIgnoreMouseEvents(false);"));
 });
 
 test("createOverlay reuses an existing window instead of creating a duplicate", () => {

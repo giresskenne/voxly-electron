@@ -1,6 +1,6 @@
 import { BrowserWindow, app, screen, shell } from "electron";
 import path from "node:path";
-import type { AppSettings, RuntimeStatus } from "./types";
+import type { AppSettings, EntitlementStatus, RuntimeStatus } from "./types";
 import { createMainLogger } from "./debug-log";
 
 const isDev = !app.isPackaged;
@@ -277,6 +277,17 @@ export class WindowManager {
     }
   }
 
+  sendSessionUpdated(entitlements: EntitlementStatus): void {
+    log.info("Broadcasting auth:session-updated", {
+      authenticated: entitlements.isAuthenticated,
+      billingPlan: entitlements.billingPlan,
+      billingStatus: entitlements.billingStatus,
+    });
+    for (const win of [this.overlay, this.settings]) {
+      win?.webContents.send("auth:session-updated", entitlements);
+    }
+  }
+
   openSettingsTab(tab: string): void {
     log.debug("Opening settings tab", { tab });
     this.createSettings();
@@ -288,10 +299,6 @@ export class WindowManager {
 
   setOverlayInteractive(interactive: boolean): void {
     log.debug("Setting overlay interactivity", { interactive });
-    if (process.platform === "win32") {
-      this.overlay?.setIgnoreMouseEvents(false);
-      return;
-    }
     this.overlay?.setIgnoreMouseEvents(!interactive, { forward: true });
   }
 

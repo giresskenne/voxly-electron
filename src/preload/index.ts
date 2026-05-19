@@ -145,6 +145,11 @@ const api = {
     ipcRenderer.on("auth:session-expired", listener);
     return () => ipcRenderer.removeListener("auth:session-expired", listener);
   },
+  onSessionUpdated: (callback: (entitlements: EntitlementStatus) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, entitlements: EntitlementStatus) => callback(entitlements);
+    ipcRenderer.on("auth:session-updated", listener);
+    return () => ipcRenderer.removeListener("auth:session-updated", listener);
+  },
   onSettingsNavigateTab: (callback: (tab: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, tab: string) => callback(tab);
     ipcRenderer.on("settings:navigate-tab", listener);

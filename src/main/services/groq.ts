@@ -156,7 +156,10 @@ export class GroqTranscriptionService {
     form.append("model", GROQ_MODEL);
     // Let the model detect the spoken language so mixed-language dictation is preserved.
 
-    const prompt = settings.customDictionary.join(" ").trim();
+    // Pass the custom dictionary as a comma-separated list so the model learns the user's
+    // terminology without treating a bare word-dump as preceding transcript text
+    // (which can cause Groq to echo the list verbatim for very short recordings).
+    const prompt = settings.customDictionary.join(", ").trim();
     if (prompt) form.append("prompt", prompt);
 
     return form;

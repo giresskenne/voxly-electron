@@ -614,6 +614,17 @@ export function SettingsApp() {
       setActiveSection("settings");
       setSettingsDefaultTab("account");
     });
+    const offSessionUpdated = window.electronAPI.onSessionUpdated((nextEntitlement) => {
+      log.info("Session updated from desktop auth callback", {
+        authenticated: nextEntitlement.isAuthenticated,
+        billingPlan: nextEntitlement.billingPlan,
+        billingStatus: nextEntitlement.billingStatus,
+      });
+      setEntitlement(nextEntitlement);
+      void syncEntitlement(true);
+      setActiveSection("settings");
+      setSettingsDefaultTab("account");
+    });
     const offNavigateTab = window.electronAPI.onSettingsNavigateTab((tab) => {
       log.debug("Navigate-tab event received", { tab });
       setActiveSection("settings");
@@ -628,6 +639,7 @@ export function SettingsApp() {
       offSettings();
       offDeepLink();
       offSessionExpired();
+      offSessionUpdated();
       offNavigateTab();
     };
   }, []);
@@ -726,8 +738,16 @@ export function SettingsApp() {
 
     const refreshToken = parsed.searchParams.get("refresh_token") ?? undefined;
     log.info("Applying auth callback token", { hasRefreshToken: Boolean(refreshToken) });
-    await window.electronAPI.setSessionToken(token, refreshToken);
-    await syncEntitlement(true);
+    try {
+      await window.electronAPI.setSessionToken(token, refreshToken);
+      log.info("Session token saved — refreshing entitlement");
+      await syncEntitlement(true);
+      log.info("Entitlement refreshed after sign-in");
+    } catch (err) {
+      log.error("Failed to complete sign-in from deep link", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   async function saveSessionToken(token: string) {
@@ -1676,6 +1696,51 @@ function SettingsPage({
 
           <div className="settings-row settings-row--stacked">
             <div>
+              <h3>Transcription mode</h3>
+              <p>Choose where your audio is transcribed.</p>
+            </div>
+            <div className="settings-mode-options" role="radiogroup" aria-label="Transcription mode">
+              {([
+                { value: "local", label: "Local", description: "On-device Whisper — private, no internet needed.", icon: Zap },
+                { value: "cloud", label: "Cloud", description: "Faster cloud model — requires account + internet.", icon: Sparkles },
+              ] as const).map(({ value, label, description, icon: Icon }) => {
+                const needsSignIn = value === "cloud" && !entitlement.canUseCloudTranscription;
+                return (
+                  <label
+                    key={value}
+                    className={cn(
+                      "settings-mode-option",
+                      settings.transcriptionMode === value && "settings-mode-option--active",
+                    )}
+                    onClick={needsSignIn ? (e) => {
+                      e.preventDefault();
+                      window.electronAPI.openWebRoute("signin");
+                    } : undefined}
+                  >
+                    <input
+                      type="radio"
+                      name="transcription-mode"
+                      value={value}
+                      checked={settings.transcriptionMode === value}
+                      onChange={() => {
+                        if (needsSignIn) {
+                          window.electronAPI.openWebRoute("signin");
+                        } else {
+                          void onPatchSettings({ transcriptionMode: value });
+                        }
+                      }}
+                    />
+                    <Icon size={17} />
+                    <span>{label}{needsSignIn && <span className="settings-mode-option__badge">Sign in</span>}</span>
+                    <small>{description}</small>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="settings-row settings-row--stacked">
+            <div>
               <h3>Paste mode</h3>
               <p>Choose whether Dicta Fun pastes instantly or waits for cleaned text first.</p>
             </div>
@@ -2128,6 +2193,11 @@ function OnboardingFlow({
   const step = onboardingSteps[stepIndex];
   const StepIcon = step.icon;
   const stepTransitionKey = `${step.id}-${settings.displayLanguage}`;
+  const stepSummary = step.id === "hotkey" && runtime.platform === "win32" && settings.hotkey !== "Control+Super"
+    ? settings.displayLanguage === "fr-FR"
+      ? "Appuyez une fois sur le raccourci pour commencer, puis appuyez une seconde fois pour arrêter. Le test transcrit votre voix ici."
+      : "Press the shortcut once to start recording, then press it again to stop. The test transcribes here."
+    : step.summary;
   const isLast = stepIndex === onboardingSteps.length - 1;
   const canGoBack = stepIndex > 0;
   const canContinue =
@@ -2198,7 +2268,7 @@ function OnboardingFlow({
                 <span>{step.eyebrow}</span>
               </p>
               <h1 id="onboarding-title">{step.title}</h1>
-              <p>{step.summary}</p>
+              <p>{stepSummary}</p>
             </motion.div>
           </AnimatePresence>
 
@@ -2261,7 +2331,11 @@ function OnboardingFlow({
                 </>
               ) : step.id === "hotkey" && !shortcutComplete ? (
                 <>
-                  {canSkipOnboarding ? "Continue (Dev Skip)" : "Complete Both Tests"}
+                  {canSkipOnboarding
+                    ? "Continue (Dev Skip)"
+                    : runtime.platform === "win32"
+                      ? "Complete Shortcut Test"
+                      : "Complete Both Tests"}
                   <ArrowRight size={17} />
                 </>
               ) : step.id === "paste-mode" && !pasteModeComplete ? (
@@ -2474,7 +2548,8 @@ function HotkeyTeachStep({
     error: string;
   };
 
-  const [activeTrial, setActiveTrial] = useState<TrialId>("push");
+  const pushTrialSupported = runtime.platform !== "win32" || settings.hotkey === "Control+Super";
+  const [activeTrial, setActiveTrial] = useState<TrialId>(() => pushTrialSupported ? "push" : "tap");
   const [trialStates, setTrialStates] = useState<Record<TrialId, TrialState>>({
     push: { status: "waiting", transcript: "", error: "" },
     tap: { status: "waiting", transcript: "", error: "" },
@@ -2487,7 +2562,7 @@ function HotkeyTeachStep({
   const recorderTrialRef = useRef<TrialId | null>(null);
   const startInFlightRef = useRef(false);
   const stopRequestedDuringStartRef = useRef(false);
-  const pushDone = trialStates.push.status === "done";
+  const pushDone = !pushTrialSupported || trialStates.push.status === "done";
   const tapDone = trialStates.tap.status === "done";
   const bothDone = pushDone && tapDone;
   const shortcutLabel = runtime.platform === "darwin" ? "Fn / Globe" : settings.hotkey;
@@ -2502,16 +2577,22 @@ function HotkeyTeachStep({
   }, [activeTrial]);
 
   useEffect(() => {
+    if (!pushTrialSupported && activeTrial !== "tap") {
+      setActiveTrial("tap");
+    }
+  }, [activeTrial, pushTrialSupported]);
+
+  useEffect(() => {
     trialStatesRef.current = trialStates;
   }, [trialStates]);
 
   useEffect(() => {
     if (bothDone) return;
-    const desiredMode: AppSettings["mode"] = activeTrial === "push" ? "push-to-talk" : "tap-to-talk";
+    const desiredMode: AppSettings["mode"] = pushTrialSupported && activeTrial === "push" ? "push-to-talk" : "tap-to-talk";
     if (settings.mode !== desiredMode) {
       void onPatchSettings({ mode: desiredMode });
     }
-  }, [activeTrial, bothDone, onPatchSettings, settings.mode]);
+  }, [activeTrial, bothDone, onPatchSettings, pushTrialSupported, settings.mode]);
 
   const updateTrial = useCallback((trial: TrialId, patch: Partial<TrialState>) => {
     setTrialStates((current) => ({
@@ -2590,7 +2671,7 @@ function HotkeyTeachStep({
           }
 
           updateTrial(stoppedTrial, { status: "done", transcript: result.text, error: "" });
-          if (stoppedTrial === "push") {
+          if (pushTrialSupported && stoppedTrial === "push") {
             setActiveTrial("tap");
           }
         } catch (err) {
@@ -2648,12 +2729,12 @@ function HotkeyTeachStep({
   useEffect(() => {
     void window.electronAPI.setHotkeyTestCaptureActive(true);
     const offStart = window.electronAPI.onDictationStart(() => {
-      if (activeTrialRef.current === "push") {
+      if (pushTrialSupported && activeTrialRef.current === "push") {
         void startTrialRecording("push");
       }
     });
     const offStop = window.electronAPI.onDictationStop(() => {
-      if (activeTrialRef.current === "push") {
+      if (pushTrialSupported && activeTrialRef.current === "push") {
         stopTrialRecording();
       }
     });
@@ -2670,7 +2751,7 @@ function HotkeyTeachStep({
       streamRef.current?.getTracks().forEach((track) => track.stop());
       onCompletionChange(false);
     };
-  }, [handleTapToggle, onCompletionChange, startTrialRecording, stopTrialRecording]);
+  }, [handleTapToggle, onCompletionChange, pushTrialSupported, startTrialRecording, stopTrialRecording]);
 
   return (
     <div className="hotkey-teach">
@@ -2682,26 +2763,28 @@ function HotkeyTeachStep({
         <HotkeyChip hotkey={settings.hotkey} platform={runtime.platform} />
       </div>
 
-      <ShortcutTrialCard
-        active={activeTrial === "push"}
-        done={pushDone}
-        icon={Mic}
-        title="1. Press and hold"
-        instruction={`Hold ${shortcutLabel}, speak a short sentence, then release to stop.`}
-        state={trialStates.push}
-      />
+      {pushTrialSupported && (
+        <ShortcutTrialCard
+          active={activeTrial === "push"}
+          done={pushDone}
+          icon={Mic}
+          title="1. Press and hold"
+          instruction={`Hold ${shortcutLabel}, speak a short sentence, then release to stop.`}
+          state={trialStates.push}
+        />
+      )}
 
       <ShortcutTrialCard
         active={activeTrial === "tap"}
         done={tapDone}
         icon={MousePointerClick}
-        title="2. Press twice"
+        title={pushTrialSupported ? "2. Press twice" : "Press twice"}
         instruction={`Press ${shortcutLabel} once, speak, then press it again to stop.`}
         state={trialStates.tap}
-        disabled={!pushDone}
+        disabled={pushTrialSupported && !pushDone}
       />
 
-      {bothDone && (
+      {bothDone && pushTrialSupported && (
         <div className="hotkey-teach__pick">
           <p className="hotkey-teach__pick-label">Which felt better?</p>
           <div className="settings-mode-options" role="radiogroup" aria-label="Preferred hotkey mode">
