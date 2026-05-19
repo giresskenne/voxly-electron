@@ -232,6 +232,9 @@ jobs:
       - name: Build Windows installer
         run: npm run dist:win
 
+      - name: Validate Windows bundled assets
+        run: node scripts/validate-windows-package.js
+
       - name: Collect EXE
         shell: pwsh
         run: |

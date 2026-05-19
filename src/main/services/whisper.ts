@@ -1,7 +1,5 @@
 import { app } from "electron";
-import { closeSync, createReadStream, existsSync, openSync, readSync, statSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { AppSettings, RuntimeStatus } from "../types";
@@ -88,6 +86,9 @@ export class WhisperService {
     this.child.once("spawn", () => {
       this.status = "ready";
       log.info("Whisper server spawned");
+      // Run a background warmup inference so the first user recording does not
+      // pay the AVX/SIMD cold-start penalty (typically 10-16 s on first run).
+      this.warmupInference(settings.whisperPort);
     });
 
     this.child.once("exit", (code, signal) => {
@@ -118,22 +119,28 @@ export class WhisperService {
       throw new Error(this.unavailableMessage());
     }
 
-    const dir = path.join(os.tmpdir(), "voxly");
-    await mkdir(dir, { recursive: true });
-    const audioPath = path.join(dir, `audio-${Date.now()}.wav`);
-    await writeFile(audioPath, Buffer.from(buffer));
-    log.debug("Temporary audio written", { audioPath, byteLength: buffer.byteLength });
-
-    try {
-      const form = new FormData();
-      const audio = await this.fileToBuffer(audioPath);
-      const file = new Blob([new Uint8Array(audio).slice()], { type: "audio/wav" });
-      form.append("file", file, "audio.wav");
-      // Preserve the spoken language first. We only translate later if the user asks.
-      // For mismatch prompts to work reliably, inference must not be forced to the UI/configured language.
-      const requestedLanguage = "auto";
+    const form = new FormData();
+    // Build the Blob directly from the in-memory buffer — no disk round-trip needed.
+    const file = new Blob([buffer], { type: "audio/wav" });
+    form.append("file", file, "audio.wav");
+      // Windows local transcription is latency-sensitive; using the configured
+      // language avoids whisper.cpp's auto-detection pass for the common path.
+      const requestedLanguage = process.platform === "win32" && settings.language && settings.language !== "auto"
+        ? settings.language
+        : "auto";
       form.append("language", requestedLanguage);
       form.append("task", "transcribe");
+      form.append("response_format", "json");
+      form.append("temperature", "0.0");
+      form.append("no_timestamps", "true");
+      form.append("token_timestamps", "false");
+      form.append("no_language_probabilities", "true");
+
+      const durationMs = estimateWavDurationMs(buffer);
+      const audioCtx = resolveFastAudioContext(durationMs);
+      if (process.platform === "win32" && audioCtx > 0) {
+        form.append("audio_ctx", String(audioCtx));
+      }
 
       const prompt = settings.customDictionary.join(" ").trim();
       if (prompt) form.append("prompt", prompt);
@@ -147,6 +154,8 @@ export class WhisperService {
         status: response.status,
         elapsedMs: Date.now() - started,
         requestedLanguage,
+        audioCtx,
+        durationMs,
       });
 
       if (!response.ok) {
@@ -163,11 +172,7 @@ export class WhisperService {
         ...(logTranscripts ? { text } : {}),
         textLength: text.length,
       });
-      return text;
-    } finally {
-      await rm(audioPath, { force: true });
-      log.debug("Temporary audio removed", { audioPath });
-    }
+    return text;
   }
 
   stop(): void {
@@ -175,6 +180,43 @@ export class WhisperService {
     this.child?.kill();
     this.child = null;
     this.activeServerKey = null;
+  }
+
+  /**
+   * Send a tiny silent audio clip to whisper.cpp right after startup so that
+   * the AVX/SIMD compute paths, decoder tensors, and CPU caches are warm before
+   * the user first speaks.  The warmup is fire-and-forget; errors are ignored.
+   */
+  private async warmupInference(port: number): Promise<void> {
+    const wav = buildSilentWav();
+    const maxAttempts = 30; // up to 15 s of polling at 500 ms intervals
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Give the HTTP server inside whisper-server time to start accepting.
+      await new Promise<void>((r) => setTimeout(r, 500));
+      if (this.status !== "ready") return; // server stopped or replaced
+      try {
+        const form = new FormData();
+        form.append("file", new Blob([new Uint8Array(wav)], { type: "audio/wav" }), "warmup.wav");
+        form.append("language", "en");
+        form.append("response_format", "json");
+        form.append("temperature", "0.0");
+        form.append("no_timestamps", "true");
+        form.append("audio_ctx", "128");
+        const started = Date.now();
+        const resp = await fetch(`http://127.0.0.1:${port}/inference`, {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(25_000),
+        });
+        if (resp.ok) {
+          log.info("Whisper inference warmup complete", { warmupMs: Date.now() - started });
+          return;
+        }
+      } catch {
+        // Server not yet accepting — retry
+      }
+    }
+    log.warn("Whisper inference warmup gave up after max attempts");
   }
 
   private resolveBinary(): string | null {
@@ -238,15 +280,72 @@ export class WhisperService {
     return "Local Whisper is still starting. Try again in a moment.";
   }
 
-  private fileToBuffer(filePath: string): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      createReadStream(filePath)
-        .on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)))
-        .on("error", reject)
-        .on("end", () => resolve(Buffer.concat(chunks)));
-    });
+}
+
+function estimateWavDurationMs(buffer: ArrayBuffer): number | null {
+  if (buffer.byteLength <= 44) return null;
+  const view = new DataView(buffer);
+  const riff = readAscii(view, 0, 4);
+  const wave = readAscii(view, 8, 4);
+  if (riff !== "RIFF" || wave !== "WAVE") return null;
+
+  const byteRate = view.getUint32(28, true);
+  if (!byteRate) return null;
+
+  let offset = 12;
+  while (offset + 8 <= view.byteLength) {
+    const chunkId = readAscii(view, offset, 4);
+    const chunkSize = view.getUint32(offset + 4, true);
+    if (chunkId === "data") {
+      return Math.round((chunkSize / byteRate) * 1000);
+    }
+    offset += 8 + chunkSize + (chunkSize % 2);
   }
+
+  return null;
+}
+
+function readAscii(view: DataView, offset: number, length: number): string {
+  let value = "";
+  for (let i = 0; i < length; i++) {
+    value += String.fromCharCode(view.getUint8(offset + i));
+  }
+  return value;
+}
+
+function resolveFastAudioContext(durationMs: number | null): number {
+  if (durationMs === null) return 0;
+  if (durationMs <= 2_000) return 128;
+  if (durationMs <= 5_000) return 256;
+  if (durationMs <= 10_000) return 512;
+  if (durationMs <= 15_000) return 768;
+  return 0;
+}
+
+/**
+ * Build a minimal silent WAV (16-bit mono 16 kHz, 0.5 s) used for the
+ * startup warmup inference.  All PCM samples are zero (silence).
+ */
+function buildSilentWav(): Buffer {
+  const sampleRate = 16_000;
+  const numSamples = 8_000; // 0.5 s
+  const dataLen = numSamples * 2; // 16-bit = 2 bytes per sample
+  const buf = Buffer.alloc(44 + dataLen, 0);
+  buf.write("RIFF", 0, "ascii");
+  buf.writeUInt32LE(36 + dataLen, 4);
+  buf.write("WAVE", 8, "ascii");
+  buf.write("fmt ", 12, "ascii");
+  buf.writeUInt32LE(16, 16);              // PCM chunk size
+  buf.writeUInt16LE(1, 20);              // format: PCM
+  buf.writeUInt16LE(1, 22);              // channels: mono
+  buf.writeUInt32LE(sampleRate, 24);
+  buf.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  buf.writeUInt16LE(2, 32);              // block align
+  buf.writeUInt16LE(16, 34);             // bits per sample
+  buf.write("data", 36, "ascii");
+  buf.writeUInt32LE(dataLen, 40);
+  // PCM data is already zeroed by Buffer.alloc
+  return buf;
 }
 
 export const whisperService = new WhisperService();

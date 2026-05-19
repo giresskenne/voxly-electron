@@ -1,6 +1,6 @@
 {
   "name": "dicta-fun-electron",
-  "version": "1.1.0",
+  "version": "1.1.1-fix-windows-app-fix.1",
   "description": "Dicta Fun desktop dictation overlay",
   "private": true,
   "type": "commonjs",
@@ -17,8 +17,9 @@
     "dist:mac": "npm run prebuild:mac && npm run build && electron-builder --mac --publish never",
     "dist:win": "npm run prebuild:win && npm run build && electron-builder --win --publish never",
     "prebuild:mac": "node scripts/download-whisper-model.js",
-    "prebuild:win": "node scripts/download-whisper-model.js && node scripts/download-nircmd.js",
+    "prebuild:win": "node scripts/download-whisper-model.js && node scripts/download-whisper-windows.js && node scripts/download-nircmd.js",
     "download:whisper-model": "node scripts/download-whisper-model.js",
+    "download:whisper-windows": "node scripts/download-whisper-windows.js",
     "download:nircmd": "node scripts/download-nircmd.js",
     "lint": "tsc --noEmit"
   },
@@ -27,7 +28,8 @@
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.14.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "uiohook-napi": "^1.5.5"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.6.1",
@@ -59,9 +61,16 @@
     "files": [
       "out/**/*",
       "resources/**/*",
+      "node_modules/uiohook-napi/**/*",
+      "node_modules/node-gyp-build/**/*",
       "!resources/bin/**",
       "!resources/models/**"
     ],
+    "asarUnpack": [
+      "node_modules/uiohook-napi/**/*",
+      "node_modules/node-gyp-build/**/*"
+    ],
+    "npmRebuild": false,
     "extraResources": [
       {
         "from": "resources/bin",

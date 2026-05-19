@@ -22,12 +22,20 @@ export function registerDictationHotkey(accelerator: string, onToggle: () => voi
     return true;
   }
 
-  const registered = globalShortcut.register(accelerator, () => {
-    log.info("Dictation hotkey triggered", { accelerator });
-    onToggle();
-  });
-  log.info("Dictation hotkey registration finished", { accelerator, registered });
-  return registered;
+  try {
+    const registered = globalShortcut.register(accelerator, () => {
+      log.info("Dictation hotkey triggered", { accelerator });
+      onToggle();
+    });
+    log.info("Dictation hotkey registration finished", { accelerator, registered });
+    return registered;
+  } catch (error) {
+    log.warn("Dictation hotkey registration failed", {
+      accelerator,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }
 
 export function unregisterHotkeys(): void {

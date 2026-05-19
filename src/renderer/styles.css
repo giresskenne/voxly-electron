@@ -606,6 +606,97 @@ button:disabled {
 }
 
 /* ── Profile contextual menu ─────────────────────────────────────────────── */
+.pill-signin-prompt {
+  width: min(360px, 92vw);
+  border-radius: 16px;
+  padding: 16px 16px 14px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pill-signin-prompt__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pill-signin-prompt__icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: var(--gradient-brand);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--primary-foreground);
+}
+
+.pill-signin-prompt__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.pill-signin-prompt__title {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.pill-signin-prompt__badge {
+  color: var(--muted-foreground);
+  background: var(--glass-bg-subtle);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pill-signin-prompt__close {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--glass-bg-subtle);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+  z-index: 1;
+}
+
+.pill-signin-prompt__close:hover {
+  background: var(--glass-bg-strong);
+  color: var(--foreground);
+}
+
+.pill-signin-prompt__copy {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.pill-signin-prompt__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pill-signin-prompt__actions > * {
+  flex: 1;
+}
+
 .voxly-profile__wrapper {
   position: relative;
   flex-shrink: 0;
@@ -1774,7 +1865,7 @@ button:disabled {
   min-height: 112px;
   border-right: 1px solid var(--onboarding-card-divider);
   background: var(--onboarding-card-bg-subtle);
-  padding: 18px 22px;
+  padding: 18px 14px;
 }
 
 .finish-card__status-item:last-child {
@@ -1790,7 +1881,8 @@ button:disabled {
 
 .finish-card dd .home-banner__shortcut-keys {
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 4px;
+  max-width: 100%;
   white-space: nowrap;
 }
 
@@ -1911,9 +2003,15 @@ button:disabled {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  min-width: 0;
   font-size: 13px;
   color: var(--foreground);
   line-height: 1.45;
+}
+
+.hotkey-teach__trial-label span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .onboarding-content[data-step="hotkey"] .hotkey-teach__trial-label {
@@ -1928,6 +2026,7 @@ button:disabled {
 }
 
 .hotkey-teach__check {
+  flex: 0 0 auto;
   margin-left: auto;
   color: var(--accent);
 }
@@ -2196,13 +2295,13 @@ button:disabled {
 }
 
 .finish-card .home-banner__key-chip--fn {
-  height: 26px;
-  padding: 0 8px;
+  height: 24px;
+  padding: 0 7px;
 }
 
 .finish-card .home-banner__key-chip--globe {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   padding: 3px 4px;
 }
 
@@ -2215,7 +2314,17 @@ button:disabled {
 .finish-card .home-banner__shortcut-part {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.finish-card :is(.home-banner__shortcut-press, .home-banner__shortcut-plus) {
+  font-size: 13px;
+}
+
+.finish-card .home-banner__key {
+  min-width: 38px;
+  padding: 3px 8px;
+  font-size: 12px;
 }
 
 .shortcut-preview :is(.home-banner__key, .home-banner__key-chip--fn, .home-banner__key-chip--globe),
@@ -3526,6 +3635,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .home-banner__shortcut-press {
@@ -3902,7 +4013,9 @@ button:disabled {
 }
 
 .settings-row--stacked {
+  flex-direction: column;
   align-items: stretch;
+  gap: 12px;
 }
 
 .settings-row h3 {
@@ -3989,9 +4102,9 @@ button:disabled {
 
 .settings-mode-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 10px;
-  width: min(100%, 460px);
+  width: 100%;
 }
 
 .settings-mode-option {
@@ -4041,6 +4154,20 @@ button:disabled {
 .settings-mode-option--disabled {
   cursor: default;
   opacity: 0.52;
+}
+
+.settings-mode-option__badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  border: 1px solid var(--glass-border);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+  line-height: 1.6;
 }
 
 .settings-toggle {

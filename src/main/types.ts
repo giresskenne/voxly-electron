@@ -68,6 +68,7 @@ export type AppSettings = {
   whisperPort: number;
   mockTranscription: boolean;
   onboardingComplete: boolean;
+  guestTrialUsed: boolean;
 };
 
 export type AudioChunk = {

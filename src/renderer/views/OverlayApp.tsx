@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { AlertTriangle, Check, ChevronDown, ClipboardPaste, Clock, Languages, Mic, ScrollText, Settings, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ClipboardPaste, Clock, Languages, LogIn, Mic, ScrollText, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppSettings, AudioChunk, CleanupStatus, FullDictationTiming, LangMismatch, PasteAttention, WeeklyUsageStatus } from "../../main/types";
 import { TextButton } from "../components/Controls";
@@ -7,7 +7,7 @@ import { createRendererLogger } from "../lib/debug-log";
 import { I18nProvider, useT } from "../lib/i18n";
 import { capture, type AnalyticsEventName, type DictationAnalyticsProperties } from "../services/analytics";
 
-type DictationState = "idle" | "recording" | "processing" | "complete" | "error";
+type DictationState = "idle" | "starting" | "recording" | "processing" | "complete" | "error";
 type PillVisualState = DictationState | "hover";
 
 const log = createRendererLogger("overlay-ui");
@@ -27,6 +27,7 @@ const COMPLETE_RESET_MS = 0;
 const PILL_SIZES = {
   idle: { width: 96, height: 7 },
   hover: { width: 124, height: 30 },
+  starting: { width: 146, height: 36 },
   recording: { width: 172, height: 36 },
   processing: { width: 146, height: 36 },
   complete: { width: 108, height: 30 },
@@ -356,6 +357,8 @@ export function OverlayApp() {
   const [error, setError] = useState("");
   const [usageLimitBlocked, setUsageLimitBlocked] = useState(false);
   const [pasteAttention, setPasteAttention] = useState<PasteAttention | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [showSignInPrompt, setShowSignInPrompt] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -379,6 +382,7 @@ export function OverlayApp() {
   const recordingStartedAtRef = useRef<number | null>(null);
   const recordingStoppedAtRef = useRef<number | null>(null);
   const lastStateRef = useRef<DictationState>("idle");
+  const pendingGuestTrialPromptRef = useRef(false);
 
   const cancelMenuClose = useCallback(() => {
     if (menuCloseTimerRef.current === null) return;
@@ -426,6 +430,27 @@ export function OverlayApp() {
     setUsageLimitBlocked(false);
     setPasteAttention(null);
     setLangMismatch(null);
+  }, []);
+
+  const showPendingGuestTrialPrompt = useCallback(() => {
+    if (!pendingGuestTrialPromptRef.current) return;
+    pendingGuestTrialPromptRef.current = false;
+    setShowSignInPrompt(true);
+  }, []);
+
+  const consumeGuestTrialIfNeeded = useCallback(async () => {
+    const currentSettings = settingsRef.current;
+    if (isAuthenticated || currentSettings?.guestTrialUsed) return false;
+    const next = await window.electronAPI.updateSettings({ guestTrialUsed: true });
+    settingsRef.current = next;
+    setSettings(next);
+    log.info("Guest trial consumed after successful dictation");
+    return true;
+  }, [isAuthenticated]);
+
+  const openSignInFromOverlay = useCallback(() => {
+    setShowSignInPrompt(false);
+    void window.electronAPI.openWebRoute("signin");
   }, []);
 
   /** Re-paste the most recent transcript without re-recording. */
@@ -477,7 +502,11 @@ export function OverlayApp() {
         return records[0]?.processedText ?? records[0]?.originalText ?? "";
       };
       const text = preview.trim() || await historyFallback();
-      if (!text.trim()) { resetToIdle(); return; }
+      if (!text.trim()) {
+        resetToIdle();
+        showPendingGuestTrialPrompt();
+        return;
+      }
       const { text: translated } = await window.electronAPI.translateText(text, mismatch.configured);
       if (
         mismatch.detected !== mismatch.configured
@@ -493,13 +522,14 @@ export function OverlayApp() {
       }
       setPreview(translated);
       setState("complete");
+      showPendingGuestTrialPrompt();
     } catch (err) {
       setState("error");
       setError(err instanceof Error ? err.message : "Translation failed.");
       return;
     }
     resetTimerRef.current = window.setTimeout(resetToIdle, COMPLETE_RESET_MS);
-  }, [preview, resetToIdle]);
+  }, [preview, resetToIdle, showPendingGuestTrialPrompt]);
 
   useEffect(() => {
     if (langMismatch && state === "complete") {
@@ -516,6 +546,13 @@ export function OverlayApp() {
       log.debug("Overlay settings loaded", next);
       settingsRef.current = next;
       setSettings(next);
+    });
+    window.electronAPI.hasSessionToken().then((hasSession) => {
+      setIsAuthenticated(hasSession);
+      if (hasSession) {
+        pendingGuestTrialPromptRef.current = false;
+        setShowSignInPrompt(false);
+      }
     });
     window.electronAPI.getWordCountThisWeek().then(setWeeklyUsage);
     const offToggle = window.electronAPI.onDictationToggle(() => {
@@ -548,11 +585,29 @@ export function OverlayApp() {
       settingsRef.current = next;
       setSettings(next);
     });
+    const offSessionUpdated = window.electronAPI.onSessionUpdated((entitlements) => {
+      log.info("Overlay received session update", {
+        authenticated: entitlements.isAuthenticated,
+        billingPlan: entitlements.billingPlan,
+        billingStatus: entitlements.billingStatus,
+      });
+      setIsAuthenticated(entitlements.isAuthenticated);
+      if (entitlements.isAuthenticated) {
+        pendingGuestTrialPromptRef.current = false;
+        setShowSignInPrompt(false);
+      }
+    });
+    const offSessionExpired = window.electronAPI.onSessionExpired(() => {
+      log.info("Overlay received session expired");
+      setIsAuthenticated(false);
+    });
     return () => {
       offToggle();
       offStart();
       offStop();
       offSettings();
+      offSessionUpdated();
+      offSessionExpired();
     };
   }, []);
 
@@ -584,14 +639,14 @@ export function OverlayApp() {
 
   // Keep interactivity in sync with all overlay-visible states so hover cannot leave the window click-blocking.
   useEffect(() => {
-    if (state === "idle" && !menuOpen && !isHovered) {
+    if (state === "idle" && !menuOpen && !isHovered && !showSignInPrompt) {
       log.debug("Overlay returned to idle — releasing mouse capture");
       void window.electronAPI.setOverlayInteractive(false);
     } else {
       log.debug("Overlay active state — capturing mouse", { state, isHovered, menuOpen });
       void window.electronAPI.setOverlayInteractive(true);
     }
-  }, [state, menuOpen, isHovered]);
+  }, [state, menuOpen, isHovered, showSignInPrompt]);
 
   const startDictation = useCallback(async () => {
     if (startInFlightRef.current || recorderRef.current?.state === "recording") {
@@ -610,7 +665,21 @@ export function OverlayApp() {
     }
     try {
       log.info("Starting dictation");
-      setState("recording");
+      const currentSettings = settingsRef.current;
+      if (!isAuthenticated && currentSettings?.guestTrialUsed) {
+        log.info("Guest trial already used; showing sign-in prompt");
+        setState("idle");
+        setError("");
+        setUsageLimitBlocked(false);
+        setPasteAttention(null);
+        setPreview("");
+        setLangMismatch(null);
+        setShowSignInPrompt(true);
+        startInFlightRef.current = false;
+        return;
+      }
+      setShowSignInPrompt(false);
+      setState("starting");
       setError("");
       setUsageLimitBlocked(false);
       setPasteAttention(null);
@@ -711,6 +780,7 @@ export function OverlayApp() {
       recorder.start(CLOUD_CHUNK_MS);
       recordingStartedAtRef.current = performance.now();
       recordingStoppedAtRef.current = null;
+      setState("recording");
       logFnFlow("media recorder started", {
         recorderState: recorder.state,
         timesliceMs: CLOUD_CHUNK_MS,
@@ -728,7 +798,9 @@ export function OverlayApp() {
         logFnFlow("stop requested during async start; stopping recorder immediately", {
           recorderState: recorder.state,
         });
-        recorder.stop();
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
       }
     } catch (err) {
       startInFlightRef.current = false;
@@ -750,7 +822,7 @@ export function OverlayApp() {
         errorType: errorType(err),
       });
     }
-  }, [resetToIdle, cleanupVoiceDetector]);
+  }, [isAuthenticated, resetToIdle, cleanupVoiceDetector]);
 
   const stopDictation = useCallback(() => {
     log.info("Stopping dictation", { recorderState: recorderRef.current?.state });
@@ -784,7 +856,7 @@ export function OverlayApp() {
       resetToIdle();
       return;
     }
-    if (state === "recording") {
+    if (state === "recording" || state === "starting") {
       stopDictation();
       return;
     }
@@ -829,6 +901,7 @@ export function OverlayApp() {
     setState("processing");
     setPreview("");
     streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
     let failureStage = "audio_prep";
     let failureMetadata: DictationAnalyticsProperties = {};
 
@@ -837,6 +910,14 @@ export function OverlayApp() {
       const t0 = performance.now();
       const blob = new Blob(chunksRef.current, { type: preferredMimeType() });
       log.debug("Audio blob prepared", { size: blob.size, type: blob.type });
+      if (chunksRef.current.length === 0 || blob.size === 0) {
+        log.warn("Empty recording captured; skipping transcription", {
+          chunkCount: chunksRef.current.length,
+          blobSize: blob.size,
+        });
+        resetToIdle();
+        return;
+      }
 
       const isCloudMode = currentSettings?.transcriptionMode === "cloud";
       let arrayBuffer: ArrayBuffer;
@@ -1007,6 +1088,7 @@ export function OverlayApp() {
         timeToRawPasteMs: dictationTiming.timeToRawPasteMs,
         fastPasteEnabled,
       });
+      const shouldPromptSignIn = await consumeGuestTrialIfNeeded();
       if (fastPasteEnabled) {
         void (async () => {
           try {
@@ -1125,7 +1207,13 @@ export function OverlayApp() {
       // If mismatch exists, keep prompt open until user acts (translate or keep).
       if (result.langMismatch) {
         setLangMismatch(result.langMismatch);
+        if (shouldPromptSignIn) {
+          pendingGuestTrialPromptRef.current = true;
+        }
       } else {
+        if (shouldPromptSignIn) {
+          setShowSignInPrompt(true);
+        }
         logFnFlow("scheduling overlay reset after paste", {
           resetMs: COMPLETE_RESET_MS,
         });
@@ -1151,10 +1239,11 @@ export function OverlayApp() {
         errorType: errorType(err),
       });
     }
-  }, [settings, resetToIdle, cleanupVoiceDetector]);
+  }, [settings, resetToIdle, cleanupVoiceDetector, consumeGuestTrialIfNeeded]);
 
   // Drives all visual changes — order matters: active states take priority over hover
   const micState = (() => {
+    if (state === "starting") return "starting" as const;
     if (state === "recording") return "recording" as const;
     if (state === "processing") return "processing" as const;
     if (state === "complete") return "complete" as const;
@@ -1168,6 +1257,7 @@ export function OverlayApp() {
 
   /** Whether the pill is large enough to show inner content. */
   const isPillExpanded =
+    state === "starting" ||
     state === "recording" ||
     state === "processing" ||
     state === "complete" ||
@@ -1229,6 +1319,48 @@ export function OverlayApp() {
         )}
       </AnimatePresence>
 
+      {/* Sign-in prompt shown after the guest trial or when recording is gated. */}
+      <AnimatePresence>
+        {showSignInPrompt && state !== "starting" && state !== "recording" && state !== "processing" && (
+          <motion.section
+            className="pill-signin-prompt glass-panel-strong"
+            initial={{ opacity: 0, y: 12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.96 }}
+            transition={{ duration: 0.18 }}
+          >
+            <div className="pill-signin-prompt__header">
+              <div className="pill-signin-prompt__icon" aria-hidden="true">
+                <LogIn size={16} />
+              </div>
+              <div className="pill-signin-prompt__title-row">
+                <span className="pill-signin-prompt__title">Sign in to keep dictating</span>
+                <span className="pill-signin-prompt__badge">Cloud included</span>
+              </div>
+              <button
+                type="button"
+                className="pill-signin-prompt__close"
+                aria-label="Dismiss"
+                onClick={() => setShowSignInPrompt(false)}
+              >
+                <X size={12} strokeWidth={2.5} />
+              </button>
+            </div>
+            <p className="pill-signin-prompt__copy">
+              Your first try is ready. Sign in to continue with local dictation or switch to cloud transcription.
+            </p>
+            <div className="pill-signin-prompt__actions">
+              <TextButton variant="primary" onClick={openSignInFromOverlay}>
+                Sign in
+              </TextButton>
+              <TextButton variant="glass" onClick={() => setShowSignInPrompt(false)}>
+                Later
+              </TextButton>
+            </div>
+          </motion.section>
+        )}
+      </AnimatePresence>
+
       {/* ── Language mismatch translation prompt ── */}
       <AnimatePresence>
         {langMismatch && state === "complete" && (
@@ -1263,6 +1395,7 @@ export function OverlayApp() {
                     configured: langMismatch.configured,
                   });
                   resetToIdle();
+                  showPendingGuestTrialPrompt();
                 }}
               >
                 <X size={12} strokeWidth={2.5} />
@@ -1288,6 +1421,7 @@ export function OverlayApp() {
                   configured: langMismatch.configured,
                 });
                 resetToIdle();
+                showPendingGuestTrialPrompt();
               }}>
                 Continue in {LANG_DISPLAY_NAMES[langMismatch.detected] ?? langMismatch.detected}
               </TextButton>
@@ -1402,6 +1536,18 @@ export function OverlayApp() {
                 {hasVoice ? <PillWave /> : <PillDots />}
               </motion.div>
             )}
+            {micState === "starting" && (
+              <motion.div
+                key="starting"
+                className="pill-bar__inner"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.1 }}
+              >
+                <PillProcessing />
+              </motion.div>
+            )}
             {micState === "processing" && (
               <motion.div
                 key="processing"
@@ -1419,7 +1565,7 @@ export function OverlayApp() {
 
         {/* Cancel button — appears to the right of the pill while recording */}
         <AnimatePresence>
-          {(state === "recording" || state === "processing") && isHovered && (
+          {(state === "starting" || state === "recording" || state === "processing") && isHovered && (
             <motion.button
               type="button"
               className="pill-hover-btn pill-hover-btn--danger"
@@ -1430,7 +1576,7 @@ export function OverlayApp() {
               transition={{ duration: 0.12 }}
               onClick={() => {
                 log.info("Cancel clicked", { state });
-                if (state === "recording") stopDictation();
+                if (state === "starting" || state === "recording") stopDictation();
               }}
             >
               <X size={12} strokeWidth={2.5} />
@@ -1449,6 +1595,16 @@ function preferredMimeType(): string {
   return "";
 }
 
+// Lazy singleton — creating AudioContext has ~50-150 ms cold-start overhead.
+// Reusing one instance eliminates that cost for every recording after the first.
+let _wavCtx: AudioContext | null = null;
+function getWavCtx(): AudioContext {
+  if (!_wavCtx || _wavCtx.state === "closed") {
+    _wavCtx = new AudioContext({ sampleRate: 16000 });
+  }
+  return _wavCtx;
+}
+
 /**
  * Decode a webm/opus blob with the browser's AudioContext and re-encode as
  * 16-bit mono 16 kHz PCM WAV — the only format whisper.cpp's HTTP server
@@ -1457,13 +1613,9 @@ function preferredMimeType(): string {
 async function blobToWav(blob: Blob): Promise<ArrayBuffer> {
   const raw = await blob.arrayBuffer();
   // 16 kHz is what Whisper expects; AudioContext will resample automatically.
-  const ctx = new AudioContext({ sampleRate: 16000 });
-  let decoded: AudioBuffer;
-  try {
-    decoded = await ctx.decodeAudioData(raw);
-  } finally {
-    await ctx.close();
-  }
+  const ctx = getWavCtx();
+  // decodeAudioData consumes a copy of raw internally; the original stays valid.
+  const decoded = await ctx.decodeAudioData(raw);
 
   const numSamples = decoded.length;
   const sampleRate = decoded.sampleRate; // 16000 after the resampling above

@@ -7,9 +7,12 @@ import { credentialStore } from "./credential-store";
 
 const log = createMainLogger("settings");
 
+const LEGACY_WINDOWS_DEFAULT_HOTKEY = "Control+Shift+Space";
+const WINDOWS_DEFAULT_HOTKEY = "Control+Super";
+
 const defaults: AppSettings = {
-  hotkey: process.platform === "darwin" ? "GLOBE" : "Control+Shift+Space",
-  mode: "tap-to-talk",
+  hotkey: process.platform === "darwin" ? "GLOBE" : WINDOWS_DEFAULT_HOTKEY,
+  mode: "push-to-talk",
   transcriptionMode: "local",
   cleanupMode: "accurate",
   selectedModel: "base",
@@ -26,6 +29,7 @@ const defaults: AppSettings = {
   whisperPort: 9999,
   mockTranscription: false,
   onboardingComplete: false,
+  guestTrialUsed: false,
 };
 
 export class SettingsStore {
@@ -38,7 +42,7 @@ export class SettingsStore {
       const file = await readFile(this.filePath, "utf8");
       const parsed = JSON.parse(file) as Partial<AppSettings>;
       await this.migratePlaintextCredentials(parsed);
-      this.cache = await this.withCredentialStatus({ ...defaults, ...this.sanitizeSettings(parsed) });
+      this.cache = await this.withCredentialStatus({ ...defaults, ...this.migrateSettings(this.sanitizeSettings(parsed)) });
       await this.persist();
       log.info("Settings loaded", this.cache);
     } catch {
@@ -90,6 +94,15 @@ export class SettingsStore {
     }
     if (next.cleanupMode) {
       next.cleanupMode = normalizeCleanupMode(next.cleanupMode);
+    }
+    return next;
+  }
+
+  private migrateSettings(settings: Partial<AppSettings>): Partial<AppSettings> {
+    const next = { ...settings };
+    if (process.platform === "win32" && next.hotkey === LEGACY_WINDOWS_DEFAULT_HOTKEY) {
+      next.hotkey = WINDOWS_DEFAULT_HOTKEY;
+      next.mode = "push-to-talk";
     }
     return next;
   }
